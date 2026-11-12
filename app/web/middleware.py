@@ -1,24 +1,18 @@
-import logging
 import time
 
 from fastapi import Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import ValidationError
 
 from app.access import auth
-from app.access.sections import has_access as has_section_access
-from app.access.sections import section_for_path
 from app.config import settings
-from app.core.logging_config import new_request_id, request_id_context
-from app.core.stores import STORES
-from app.dto.identity import SectionAccessLevel, SessionToken
-from app.web.access import has_store_access
-from app.web.templating import render_access_denied_page
+from app.core.logging_config import new_request_id, request_id_context, tagged_logger
+from app.dto.identity import SessionToken
 
 PUBLIC_PATHS = {"/healthz", "/readyz", "/login", "/logout"}
 QUIET_PATH_PREFIXES = ("/static/",)
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "web", "middleware")
 
 
 async def authentication_middleware(request: Request, call_next):
@@ -55,67 +49,13 @@ async def authentication_middleware(request: Request, call_next):
         user = await run_in_threadpool(request.app.state.container.identity.user_for_token, token)
     request.state.user = user
 
-    if user is None:
+    if user is None or not user.is_active:
         wants_json = "application/json" in request.headers.get("accept", "") or (
             request.headers.get("x-requested-with") == "fetch"
         )
         if wants_json or request.method != "GET":
             return JSONResponse({"ok": False, "error": "Требуется вход в систему"}, status_code=401)
         return RedirectResponse("/login", status_code=303)
-
-    section = section_for_path(path)
-    required_access = (
-        SectionAccessLevel.READ if request.method in {"GET", "HEAD", "OPTIONS"} else SectionAccessLevel.WRITE
-    )
-    if request.method == "POST" and (
-        path.startswith("/api/unit-economics-1c/yandex-market/calculate/")
-        or path == "/api/unit-economics-1c/calculator/verify"
-        or path == "/api/unit-economics-1c/reports/target-price.xlsx"
-        or path == "/api/unit-economics-1c/yandex-market/reports/target-price.xlsx"
-        or (
-            path.startswith("/api/unit-economics-1c/yandex-market/reports/target-price/")
-            and path.endswith("/preview")
-        )
-    ):
-        required_access = SectionAccessLevel.READ
-    if section is not None and not has_section_access(user, section, required_access):
-        wants_json = "application/json" in request.headers.get("accept", "") or (
-            request.headers.get("x-requested-with") == "fetch"
-        )
-        message = (
-            "Раздел доступен только для просмотра"
-            if required_access is SectionAccessLevel.WRITE
-            and has_section_access(user, section, SectionAccessLevel.READ)
-            else "Нет доступа к этому разделу"
-        )
-        if wants_json or request.method != "GET":
-            return JSONResponse({"ok": False, "error": message}, status_code=403)
-        return HTMLResponse(
-            render_access_denied_page(user, section=section),
-            status_code=403,
-        )
-
-    if path.startswith("/stock/"):
-        parts = path.strip("/").split("/")
-        store_slug = parts[1].lower() if len(parts) > 1 else ""
-        if store_slug in STORES and not has_store_access(user, store_slug):
-            wants_json = "application/json" in request.headers.get("accept", "") or (
-                request.headers.get("x-requested-with") == "fetch"
-            )
-            if wants_json or request.method != "GET":
-                return JSONResponse({"ok": False, "error": "Нет доступа к этому магазину"}, status_code=403)
-            store_name = STORES[store_slug]["name"]
-            return HTMLResponse(
-                render_access_denied_page(
-                    user,
-                    heading="Нет доступа к кабинету",
-                    description=(
-                        f"Кабинет «{store_name}» недоступен для вашей учётной записи. "
-                        "Если он нужен для работы, обратитесь к суперадминистратору."
-                    ),
-                ),
-                status_code=403,
-            )
 
     response = await call_next(request)
     if path.startswith(
@@ -142,16 +82,21 @@ async def request_logging_middleware(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        route = request.scope.get("route")
+        route_path = route.path if route is not None else request.url.path
         logger.exception(
-            "request_failed method=%s path=%s duration_ms=%s client=%s",
+            "request_failed method=%s path=%s route=%s duration_ms=%s client=%s",
             request.method,
             request.url.path,
+            route_path,
             elapsed_ms,
             request.client.host if request.client else "-",
         )
         raise
     else:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        route = request.scope.get("route")
+        route_path = route.path if route is not None else request.url.path
         quiet_path = request.url.path in {"/healthz", "/readyz"} or request.url.path.startswith(
             QUIET_PATH_PREFIXES
         )
@@ -160,18 +105,16 @@ async def request_logging_middleware(request: Request, call_next):
                 log = logger.error
             elif response.status_code >= 400:
                 log = logger.warning
-            elif request.method not in {"GET", "HEAD", "OPTIONS"}:
-                log = logger.info
-            elif elapsed_ms >= settings.slow_request_threshold_ms:
-                log = logger.info
             else:
-                log = logger.debug
+                log = logger.info
             log(
-                "request_completed method=%s path=%s status=%s duration_ms=%s client=%s",
+                "request_completed method=%s path=%s route=%s status=%s duration_ms=%s slow=%s client=%s",
                 request.method,
                 request.url.path,
+                route_path,
                 response.status_code,
                 elapsed_ms,
+                str(elapsed_ms >= settings.slow_request_threshold_ms).lower(),
                 request.client.host if request.client else "-",
             )
         response.headers["X-Request-ID"] = request_id

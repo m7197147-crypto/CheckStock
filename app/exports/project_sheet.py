@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 from urllib.parse import urlsplit
 
+from app.core.constants import Marketplace
 from app.core.domain import MOSCOW_TIMEZONE
+from app.core.logging_config import tagged_logger
 from app.core.stores import PROJECT_STORE_ALIASES, STORES
 from app.exports import fbo_transit
 from app.exports import stock_sheet as legacy
+from app.exports.project_scope import stores_for_marketplace
+from app.infrastructure.legacy_google_export import schedule_managed
 from app.jobs import locks as sync_locks
 from app.repositories import project_sheet_export as repository
 
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "exports", "project_sheet")
 
 MARKETPLACES = repository.MARKETPLACES
 EXPORT_KINDS = (*legacy.EXPORT_KINDS, "fbo_transit")
@@ -155,7 +158,7 @@ def is_due(settings: ProjectSheetExportSettings, now: datetime | None = None) ->
 
 def _stock_snapshot(marketplace: str, *, now: datetime | None = None) -> list[ProjectStockSnapshot]:
     snapshots = []
-    for store_slug in STORES:
+    for store_slug in stores_for_marketplace(marketplace):
         # A separate snapshot keeps unknown inbound quantities local to this project.
         catalog, values, warnings = legacy._combined_stock_snapshot(
             (store_slug,), marketplace, now=now, allow_saved_snapshot=True
@@ -167,7 +170,7 @@ def _stock_snapshot(marketplace: str, *, now: datetime | None = None) -> list[Pr
 def _order_totals(marketplace: str, *, now: datetime | None = None) -> dict[str, dict[str, int]]:
     run = legacy._FbsExportRun(now or datetime.now(MOSCOW_TIMEZONE))
     totals = {}
-    for store_slug in STORES:
+    for store_slug in stores_for_marketplace(marketplace):
         try:
             totals[store_slug] = legacy._combined_fbs_order_totals((store_slug,), marketplace, run=run)
         except Exception as error:
@@ -267,22 +270,27 @@ def _plan_quantities(
     sheet: dict,
     *,
     label: str,
+    preloaded_rows: list[list[object]] | None = None,
 ) -> OrderSheetPlan:
     sheet_name = sheet_name.strip()
     column_index = _order_column_index(column)
     column = legacy._column_letter(column_index)
     quoted_sheet = legacy._quote_sheet(sheet_name)
     rows = (
-        service.spreadsheets()
-        .values()
-        .get(spreadsheetId=spreadsheet_id, range=quoted_sheet, valueRenderOption="FORMATTED_VALUE")
-        .execute(num_retries=legacy.GOOGLE_REQUEST_RETRIES)
-        .get("values", [])
+        preloaded_rows
+        if preloaded_rows is not None
+        else (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=quoted_sheet, valueRenderOption="FORMATTED_VALUE")
+            .execute(num_retries=legacy.GOOGLE_REQUEST_RETRIES)
+            .get("values", [])
+        )
     )
     headers = []
     for index, row in enumerate(rows):
         normalized = [legacy._header_key(value) for value in row]
-        projects = [col for col, value in enumerate(normalized) if value in {"проект", "project"}]
+        projects = [col for col, value in enumerate(normalized) if value in {"проект", "project", "магазин"}]
         articles = [col for col, value in enumerate(normalized) if value in {"артикул", "article"}]
         if projects and articles:
             if len(projects) != 1 or len(articles) != 1:
@@ -292,13 +300,14 @@ def _plan_quantities(
             headers.append((index, projects[0], articles[0]))
     if len(headers) != 1:
         raise StockSheetExportError(
-            f"Лист «{sheet_name}»: нужна одна шапка с колонками ПРОЕКТ (Project) и АРТИКУЛ (Article)"
+            f"Лист «{sheet_name}»: нужна одна шапка с колонками ПРОЕКТ (Project, Магазин) и АРТИКУЛ (Article)"
         )
     header_row, project_column, article_column = headers[0]
     header = rows[header_row]
     if column_index < len(header) and legacy._header_key(header[column_index]) in {
         "проект",
         "project",
+        "магазин",
         "артикул",
         "article",
         "ключ",
@@ -316,7 +325,11 @@ def _plan_quantities(
     last_row = len(rows)
     grid = sheet["properties"].get("gridProperties", {})
     grid_columns = grid.get("columnCount", column_index + 1)
-    if column_index < grid_columns and first_row <= grid.get("rowCount", first_row):
+    if (
+        preloaded_rows is None
+        and column_index < grid_columns
+        and first_row <= grid.get("rowCount", first_row)
+    ):
         existing_values = (
             service.spreadsheets()
             .values()
@@ -472,6 +485,7 @@ def export_all(
     *,
     marketplace: str | None = None,
     export_kind: str | None = None,
+    scheduled: bool = False,
 ) -> dict:
     if marketplace is not None and marketplace not in MARKETPLACES:
         raise ValueError("Неизвестный маркетплейс")
@@ -484,6 +498,9 @@ def export_all(
     spreadsheet_ids: dict[str, str] = {}
     reports = []
     for selected in (marketplace,) if marketplace is not None else MARKETPLACES:
+        if scheduled and schedule_managed(Marketplace(selected)):
+            reports.append({"marketplace": selected, "skipped": True, "updated_cells": 0})
+            continue
         target = settings.target(selected)
         include_stocks = export_kind in (None, "stocks") and bool(target.stock_sheet_name.strip())
         include_orders = export_kind in (None, "fbs_orders") and bool(target.orders_sheet_name.strip())
@@ -571,7 +588,11 @@ def export_all(
         ]
         report["updated_cells"] += orders_report["updated_cells"] + fbo_report["updated_cells"]
         reports.append(report)
-    return {"spreadsheet_ids": spreadsheet_ids, "store_slugs": tuple(STORES), "marketplaces": reports}
+    return {
+        "spreadsheet_ids": spreadsheet_ids,
+        "store_slugs": stores_for_marketplace(marketplace) if marketplace else tuple(STORES),
+        "marketplaces": reports,
+    }
 
 
 def run_export(
@@ -579,6 +600,7 @@ def run_export(
     *,
     marketplace: str | None = None,
     export_kind: str | None = None,
+    scheduled: bool = False,
 ) -> dict:
     ensure_defaults()
     now = now or datetime.now(MOSCOW_TIMEZONE)
@@ -587,7 +609,7 @@ def run_export(
     if not scoped:
         repository.record_attempt(attempted_at)
     try:
-        report = export_all(now, marketplace=marketplace, export_kind=export_kind)
+        report = export_all(now, marketplace=marketplace, export_kind=export_kind, scheduled=scheduled)
     except Exception as error:
         if not scoped:
             try:
@@ -612,4 +634,4 @@ def run_due(now: datetime | None = None) -> dict:
     current = now or datetime.now(MOSCOW_TIMEZONE)
     if not is_due(get_settings(), current):
         return {}
-    return {"all_projects": {"ok": True, "report": run_export(current)}}
+    return {"all_projects": {"ok": True, "report": run_export(current, scheduled=True)}}

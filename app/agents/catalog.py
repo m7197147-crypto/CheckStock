@@ -1,7 +1,33 @@
-"""Human-readable reference shared by OpenAPI and the employee API catalog."""
+from app.agents.ozon_catalog import TITLES as OZON_TITLES
+from app.agents.ozon_reports import SPECS as OZON_SPECS
 
 # Fields describe the main response fields, not an exhaustive schema for every view.
 DOCS = {
+    "rating-comparison": (
+        "Рейтинг склейки WB — сравнение периодов",
+        "Последний сохранённый рейтинг склейки WB в выбранном и предыдущем равном периоде, изменение в пунктах. Индивидуальный рейтинг без склейки в БД отсутствует. Итоги считаются по всей отфильтрованной выборке до пагинации, по карточкам, не по уникальным склейкам.",
+        "store_slug:Магазин:str|nm_id:Артикул карточки WB, не идентификатор склейки:str|article:Артикул товара:str|name:Название товара:str|brand:Бренд:str|null|manager:Менеджер:str|null|subject:Категория:str|null|latest_rating:Свежий рейтинг склейки WB, отдельно от периода:number|null|reviews_count:Свежий счётчик отзывов:integer|null|latest_observed_at:Время обновления текущего кэша:datetime|null|current_rating:Последний рейтинг склейки WB внутри выбранного периода:number|null|current_observed_day:Фактический день замера выбранного периода:date|null|current_observed_at:Фактическое время замера выбранного периода:datetime|null|previous_rating:Последний рейтинг склейки WB предыдущего равного периода:number|null|previous_observed_day:Фактический день замера предыдущего периода:date|null|previous_observed_at:Фактическое время замера предыдущего периода:datetime|null|change:Изменение рейтинга склейки WB в пунктах, не процентах:number|null|status:Состояние сравнения problem / healthy / no_data:str|context.previous_from:Начало предыдущего равного периода:date|context.previous_to:Конец предыдущего равного периода:date|context.rating_label:Обязательная подпись показателя:str|context.individual_rating_available:Рейтинг без склейки отсутствует в БД:bool|totals.checked:Карточек во всей отфильтрованной выборке:integer|totals.problem:Карточек с падением больше tolerance:integer|totals.healthy:Карточек без падения больше tolerance:integer|totals.no_data:Карточек с недостаточными данными для сравнения:integer",
+    ),
+    "rating-history": (
+        "Рейтинг склейки WB — дневная история",
+        "Рейтинг склейки WB и отзывы за каждый день выбранного периода для одной карточки. Пропуски остаются null; индивидуальный рейтинг без склейки неизвестен. Сохранённые данные, без запуска синхронизации.",
+        "store_slug:Магазин:str|nm_id:Артикул карточки WB, не идентификатор склейки:str|article:Артикул товара:str|name:Название товара:str|brand:Бренд:str|null|manager:Менеджер:str|null|subject:Категория:str|null|day:День по Москве:date|rating:Сохранённый дневной рейтинг склейки WB:number|null|reviews_count:Число отзывов в дневном замере:integer|null|observed_at:Фактическое время дневного замера:datetime|null|context.rating_label:Обязательная подпись показателя:str|context.individual_rating_available:Рейтинг без склейки отсутствует в БД:bool|context.coverage_complete:Все дни имеют сохранённый замер:bool|totals.expected_days:Всего дней периода:integer|totals.observed_days:Дней с замером:integer|totals.missing_days:Дней без замера:integer",
+    ),
+    "standard-costs": (
+        "Расходы WB без ИУ",
+        "Последний сохранённый отчёт магазина: прибыль и ROI без ИУ и с ИУ, разница и состояние отчёта. Значения на единицу товара; это не фактическая прибыль за неделю. Произвольный период не поддерживается.",
+        "article:Артикул:str|scheme:Схема FBW/FBS:str|name:Название товара:str|profit:Сценарий без ИУ:object|current_profit:Сценарий с ИУ:object|delta:Без ИУ минус с ИУ:object",
+    ),
+    "spp-hourly": (
+        "СПП WB — почасовые данные",
+        "Сохранённые наблюдения. Даты отбираются по МСК. После закрытия дня часы удаляются; отсутствие записи не означает ноль.",
+        "article:Артикул:str|observed_at:Точное время наблюдения:datetime|customer_price_with_spp:Цена покупателя с СПП, ₽:number|spp_percent:СПП, %:number|null|customer_price_with_wallet:Цена с WB Кошельком, ₽:number|null",
+    ),
+    "spp-daily": (
+        "СПП WB — дневные средние",
+        "Сохранённые средние закрытых дней. Веса — положительный накопленный оборот в момент наблюдения; без весов — обычное среднее. Пропуски не заменяются нулём.",
+        "article:Артикул:str|day:Дата дня по МСК:date|observed_at:Время последнего наблюдения:datetime|average_customer_price_with_spp:Средняя цена покупателя с СПП, ₽:number|average_spp_percent:Средний СПП, %:number|null|average_customer_price_with_wallet:Средняя цена с WB Кошельком, ₽:number|null",
+    ),
     "stores": (
         "Магазины",
         "Доступные магазины и площадки.",
@@ -155,6 +181,14 @@ DOCS = {
 }
 
 
+DOCS.update(
+    {
+        name: (title, OZON_SPECS[name].description, "article:Точный offer_id Ozon:str")
+        for name, title in OZON_TITLES.items()
+    }
+)
+
+
 def documentation(name):
     from app.agents.catalog_fields import enrich
 
@@ -179,20 +213,25 @@ def documentation(name):
     yandex = guide(name, result)
     if yandex:
         result["marketplace_guides"] = {"YANDEX MARKET": yandex}
+    from app.agents.marketplaces import supports
+    from app.agents.ozon_catalog import guide as ozon_guide
+
+    if supports(name, "OZON"):
+        result.setdefault("marketplace_guides", {})["OZON"] = ozon_guide(name, result)
     return result
 
 
 async def employee_catalog(user):
-    from app.access.access_control import scope_pairs
+    from app.access.resources import store_marketplace_pairs
     from app.agents.catalog_fields import ENVELOPE
-    from app.agents.yandex_reports import SUPPORTED
+    from app.agents.marketplaces import supports
     from app.web.routers.agent_analytics import action_schema
     from app.web.routers.agent_full import SPECS, capabilities
 
     schema = await action_schema()
     available = await capabilities(user)
     scopes = {item["report"]: item["scopes"] for item in available["reports"]}
-    common = [{"store": store, "marketplace": mp} for store, mp in scope_pairs(user)]
+    common = [{"store": store, "marketplace": mp} for store, mp in store_marketplace_pairs(user)]
     result = []
     for path, methods in schema["paths"].items():
         name = path.rsplit("/", 1)[-1]
@@ -208,12 +247,7 @@ async def employee_catalog(user):
                 "path": path,
                 "operation_id": operation["operationId"],
                 **documentation(name),
-                "marketplace_support": {
-                    "WB": True,
-                    "YANDEX MARKET": name in SUPPORTED
-                    or (name in SPECS and not SPECS[name][1])
-                    or name in {"stores", "capabilities", "article-stores", "data-status", "loss-products"},
-                },
+                "marketplace_support": {mp: supports(name, mp) for mp in ("WB", "YANDEX MARKET", "OZON")},
                 "scopes": allowed,
                 "parameters": operation.get("parameters", []),
                 "response_schema": operation.get("responses", {}).get("200", {}),

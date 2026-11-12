@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 from app import db
+from app.core.logging_config import tagged_logger
 from app.core.stores import STORES
 from app.ff_import.importer import (
     FFImportError,
@@ -14,7 +14,7 @@ from app.ff_import.importer import (
 from app.wb import api as wb_api
 from app.wb import tokens as wb_tokens
 
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "economics", "wb", "reference_data")
 
 ABC_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/1uP5RZioJgAoX-LTkXay7nbZvp_tk2EPAl0hCAeM8fdE/edit?gid=516789637"
@@ -210,6 +210,7 @@ def sync_product_categories(store_slug: str) -> dict:
             "imt_id": card.get("imtID"),
             "created_at": str(card.get("createdAt") or "").strip() or None,
             "category": _text(card.get("subjectName")) or None,
+            "brand": _text(card.get("brand")) or None,
         }
         for card in cards
         if str(card.get("nmID") or "").strip()
@@ -229,6 +230,7 @@ def sync_product_categories(store_slug: str) -> dict:
                 "imt_id": category.get("imt_id"),
                 "created_at": category.get("created_at"),
                 "category": name,
+                "brand": category.get("brand"),
                 "category_key": _category_key(name) or None,
             }
         )

@@ -1,13 +1,13 @@
 """Read Yandex reports into a separate cache without changing the existing ledgers."""
 
 import json
-import logging
 import math
 import time
 import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -15,16 +15,18 @@ from io import BytesIO
 from threading import Lock
 
 from app.config import settings
+from app.core.constants import YANDEX_ORDERS
 from app.core.domain import MOSCOW_TIMEZONE
+from app.core.logging_config import tagged_logger
 from app.core.stores import STORES
 from app.jobs import locks as sync_locks
+from app.orders.normalizers import yandex as order_normalizer
 from app.repositories import unit_economics_yandex as repository
 from app.repositories import yandex_report_limits as report_limits
-from app.stock import sales
 from app.yandex import api, tokens
 from app.yandex.accounts import resolve_business_id
 
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "yandex", "unit_economics_sync")
 SYNC_INTERVAL_SECONDS = {
     "orders": 15 * 60,
     "reputation": 24 * 60 * 60,
@@ -56,7 +58,7 @@ def _number(value: object) -> float:
     return result
 
 
-def _report_rows(value: object, identifier: str):
+def _report_rows(value: object, identifier: str) -> Iterator[dict[str, object]]:
     if isinstance(value, dict):
         if identifier in value:
             yield value
@@ -68,18 +70,39 @@ def _report_rows(value: object, identifier: str):
             yield from _report_rows(child, identifier)
 
 
-def download_report(url: str, sheet: str, identifier: str) -> list[dict]:
+def _strict_report_rows(value: object, identifier: str) -> list[dict[str, object]]:
+    if isinstance(value, list):
+        rows: list[dict[str, object]] = []
+        for item in value:
+            if not isinstance(item, dict) or any(not isinstance(key, str) for key in item):
+                raise ValueError("invalid_report_row")
+            rows.append(dict(item))
+        return rows
+    if isinstance(value, dict):
+        if identifier in value:
+            return [dict(value)]
+        if not value:
+            return []
+        if any(not isinstance(child, (dict, list)) for child in value.values()):
+            raise ValueError("invalid_report_wrapper")
+        return [row for child in value.values() for row in _strict_report_rows(child, identifier)]
+    raise ValueError("invalid_report_structure")
+
+
+def download_report(
+    url: str, sheet: str, identifier: str, *, strict_rows: bool = False
+) -> list[dict[str, object]]:
     if urllib.parse.urlsplit(url).scheme != "https":
         raise ValueError("ЯМ не вернул HTTPS-ссылку на отчёт")
     with urllib.request.urlopen(url, timeout=settings.rnp_report_download_timeout_seconds) as response:
         content = response.read()
-    rows = []
+    rows: list[dict[str, object]] = []
     with zipfile.ZipFile(BytesIO(content)) as archive:
         names = [name for name in archive.namelist() if name.rsplit("/", 1)[-1] == sheet + ".json"]
         if len(names) != 1:
             raise ValueError(f"В отчёте ЯМ не найден лист {sheet}")
         data = json.loads(archive.read(names[0]).decode("utf-8-sig"))
-        rows.extend(_report_rows(data, identifier))
+        rows.extend(_strict_report_rows(data, identifier) if strict_rows else _report_rows(data, identifier))
         if (
             not rows
             and data not in ([], {})
@@ -89,7 +112,15 @@ def download_report(url: str, sheet: str, identifier: str) -> list[dict]:
     return rows
 
 
-def load_report(api_key: str, report: str, payload: dict, sheet: str, identifier: str) -> list[dict]:
+def load_report(
+    api_key: str,
+    report: str,
+    payload: dict[str, int | str],
+    sheet: str,
+    identifier: str,
+    *,
+    strict_rows: bool = False,
+) -> list[dict[str, object]]:
     """Serialize report generation per business while allowing orders to sync independently.
 
     Count from completion, including retries and network delay, so the next generation cannot land inside the server's quota window."""
@@ -116,7 +147,9 @@ def load_report(api_key: str, report: str, payload: dict, sheet: str, identifier
                         retry_at = None
                         retry_delay = interval + 5
                         try:
-                            return _load_report(api_key, report, payload, sheet, identifier)
+                            return _load_report(
+                                api_key, report, payload, sheet, identifier, strict_rows=strict_rows
+                            )
                         except api.YandexApiError as error:
                             retry_at = error.retry_at
                             if error.status in (420, 429):
@@ -146,7 +179,15 @@ def load_report(api_key: str, report: str, payload: dict, sheet: str, identifier
         time.sleep(min(delay, 30))
 
 
-def _load_report(api_key: str, report: str, payload: dict, sheet: str, identifier: str) -> list[dict]:
+def _load_report(
+    api_key: str,
+    report: str,
+    payload: dict[str, int | str],
+    sheet: str,
+    identifier: str,
+    *,
+    strict_rows: bool = False,
+) -> list[dict[str, object]]:
     generated = api.request(
         f"/v2/reports/{report}/generate", api_key, payload=payload, params={"format": "JSON"}
     )
@@ -160,7 +201,7 @@ def _load_report(api_key: str, report: str, payload: dict, sheet: str, identifie
     for attempt in range(poll_attempts):
         info = api.request(f"/v2/reports/info/{report_id}", api_key, method="GET")
         if info.get("status") == "DONE":
-            return download_report(str(info.get("file") or ""), sheet, identifier)
+            return download_report(str(info.get("file") or ""), sheet, identifier, strict_rows=strict_rows)
         if info.get("status") == "FAILED":
             raise RuntimeError("ЯМ не смог сформировать отчёт")
         if attempt + 1 < poll_attempts:
@@ -197,7 +238,11 @@ def _advertising_number(row: dict, field: str) -> float:
 
 
 def load_advertising(api_key: str, business_id: int, start: date, end: date) -> list[dict]:
-    payload = {"businessId": business_id, "dateFrom": start.isoformat(), "dateTo": end.isoformat()}
+    payload: dict[str, int | str] = {
+        "businessId": business_id,
+        "dateFrom": start.isoformat(),
+        "dateTo": end.isoformat(),
+    }
     boost = load_report(api_key, "boost-consolidated", payload, "business_boost_consolidated", "shopSku")
     shows = load_report(
         api_key,
@@ -232,24 +277,65 @@ def load_orders(store_slug: str, api_key: str, business_id: int, start: date, en
     orders = api.get_business_orders(
         api_key, business_id, start.isoformat(), (end + timedelta(days=1)).isoformat()
     )
-    lines = sales._normalize_yandex(store_slug, orders)
+    supported = []
+    for order in orders:
+        program = str(order.get("programType") or "").strip().upper()
+        if not program:
+            raise ValueError("В заказе ЯМ отсутствует схема работы")
+        if program in YANDEX_ORDERS.programs:
+            created = order.get("creationDate") or order.get("createdAt")
+            if not created or not (order.get("orderId") or order.get("id")):
+                raise ValueError("В заказе ЯМ отсутствует дата или идентификатор")
+            datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            items = order.get("items")
+            if not isinstance(items, list) or not items:
+                raise ValueError("В заказе ЯМ отсутствует состав товаров")
+            normalized_items = []
+            for product in items:
+                quantity = product.get("count")
+                if (
+                    not (product.get("offerId") or product.get("shopSku"))
+                    or type(quantity) is not int
+                    or quantity < 0
+                ):
+                    raise ValueError("Некорректный товар заказа ЯМ")
+                statuses = product.get("itemStatuses") or []
+                if not isinstance(statuses, list) or any(
+                    not isinstance(status, dict)
+                    or not status.get("status")
+                    or type(status.get("count")) is not int
+                    or status["count"] < 0
+                    for status in statuses
+                ):
+                    raise ValueError("Некорректные статусы единиц товара ЯМ")
+                quantity = max(quantity, sum(status["count"] for status in statuses))
+                if quantity:
+                    normalized_items.append({**product, "count": quantity})
+            if normalized_items:
+                supported.append({**order, "programType": program, "items": normalized_items})
+    lines = order_normalizer.normalize(store_slug, supported)
     unique_lines = {(line["order_key"], line["line_key"]): line for line in lines}
+    if len(unique_lines) != len(lines):
+        raise ValueError("Повтор строки заказа ЯМ")
     grouped = defaultdict(
         lambda: dict.fromkeys(
             ("orders_count", "orders_amount", "cancel_count", "cancel_amount", "sold_count"), 0
         )
     )
     for line in unique_lines.values():
+        if not 0 <= line["cancelled_quantity"] <= line["quantity"]:
+            raise ValueError("Некорректное количество отмен ЯМ")
         day = str(line["ordered_at"])[:10]
         if not start.isoformat() <= day <= end.isoformat():
             continue
         item = grouped[(line["article"], day)]
         scheme = "FBY" if line["scheme"] == "fbo" else "FBS"
         scheme_data = item.setdefault("schemes", {}).setdefault(
-            scheme, {"orders_count": 0, "orders_amount": 0}
+            scheme, {"orders_count": 0, "orders_amount": 0, "cancel_count": 0}
         )
         scheme_data["orders_count"] += line["quantity"]
         scheme_data["orders_amount"] += line["order_amount"]
+        scheme_data["cancel_count"] += line["cancelled_quantity"]
         for field, source in (
             ("orders_count", "quantity"),
             ("orders_amount", "order_amount"),
@@ -259,7 +345,13 @@ def load_orders(store_slug: str, api_key: str, business_id: int, start: date, en
         ):
             item[field] += line[source]
     return [
-        {"article": article, "day": day, "amount_basis": "with_subsidy", **values}
+        {
+            "article": article,
+            "day": day,
+            "amount_basis": "with_subsidy",
+            "orders_scope": YANDEX_ORDERS.scope,
+            **values,
+        }
         for (article, day), values in grouped.items()
     ]
 

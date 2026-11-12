@@ -4,12 +4,12 @@
     data-collapsed
 >
     <h3 class="panel-title">Отгрузки стока</h3>
-    <p class="stock-operation-summary">Отгрузить наружу, переместить на FBS или зафиксировать расхождение.</p>
+    <p class="stock-operation-summary">Отгрузить наружу или зафиксировать расхождение.</p>
 
     <div class="panel-body">
         <p class="panel-desc"
-            >Обычная отгрузка списывает физический остаток. Перемещение на FBS только фиксирует доступный для
-            продаж товар — физически он остаётся на фулфилменте.</p
+            >Отгрузка уменьшает доступное на ФФ для распределения. Для поставки FBO выберите ФФ
+            в «Движении товаров», дождитесь проверки остатков и нажмите «Провести» в карточке поставки.</p
         >
 
         <div class="route route--single">
@@ -35,11 +35,11 @@
             aria-required="true"
         />
 
-        <label class="check-line">
-            <input type="checkbox" id="sh-fbs" />
+        <label class="check-line" id="sh-fbo-option" hidden>
+            <input type="checkbox" id="sh-fbo" />
             <span>
-                <b>Перемещение на FBS</b> — зафиксировать товар в продаже FBS, не списывая его с физического
-                остатка фулфилмента.
+                <b>Повторить прежнюю отгрузку FBO</b> — только если ответ на неё не пришёл.
+                Введите прежние данные операции. Новые поставки учитываются автоматически.
             </span>
         </label>
 
@@ -50,6 +50,16 @@
                 исчезнет: оно ляжет в мусорку вместе со складом, на котором потерялось.
             </span>
         </label>
+
+        <div id="sh-legacy-fbs-option" hidden>
+            <label class="check-line">
+                <input type="checkbox" id="sh-legacy-fbs" />
+                <span>
+                    <b>Повторить прежнее перемещение на FBS</b> — выберите, если ответ на него не пришёл
+                    до обновления страницы. Введите прежние данные операции.
+                </span>
+            </label>
+        </div>
 
         <div class="io-block" id="sh-io">
             <div class="io-block-head">

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import settings
+from app.core.constants import JOBS, SyncJobMetadata
 from app.yandex.category_commissions import JOB as YANDEX_CATEGORY_COMMISSIONS_JOB
 from app.yandex.product_novelty import SYNC_INTERVAL_SECONDS as YANDEX_NOVELTY_INTERVAL_SECONDS
 from app.yandex.unit_economics_sync import SYNC_INTERVAL_SECONDS as YANDEX_SYNC_INTERVAL_SECONDS
@@ -18,6 +19,19 @@ class SyncJobDefinition:
     scope: str = "global"
     marketplaces: tuple[str, ...] = ()
     manual_run: bool = True
+
+
+def from_metadata(metadata: SyncJobMetadata, enabled: bool) -> SyncJobDefinition:
+    return SyncJobDefinition(
+        name=metadata.name,
+        title=metadata.title,
+        description=metadata.description,
+        schedule=metadata.schedule or "",
+        enabled=enabled,
+        scope=metadata.scope,
+        marketplaces=metadata.marketplaces,
+        manual_run=metadata.manual_run,
+    )
 
 
 def _interval(seconds: int) -> str:
@@ -38,6 +52,24 @@ def job_definitions() -> tuple[SyncJobDefinition, ...]:
     funnel = base or settings.funnel_orders_sync_enabled
     prices = settings.unit_economics_1c_price_sync_enabled
     return (
+        from_metadata(JOBS.database_backup, settings.database_backup.enabled),
+        *(
+            SyncJobDefinition(
+                name=metadata.name,
+                title=metadata.title,
+                description=metadata.description,
+                schedule=metadata.schedule or "",
+                enabled=base,
+                scope=metadata.scope,
+                marketplaces=metadata.marketplaces,
+                manual_run=metadata.manual_run,
+            )
+            for metadata in JOBS.google_weeks
+        ),
+        from_metadata(JOBS.wb_ephemerides_stock, base),
+        from_metadata(JOBS.yandex_analytics_funnel, base),
+        from_metadata(JOBS.yandex_customer_transit, base),
+        from_metadata(JOBS.yandex_ephemerides_stock, base),
         SyncJobDefinition(
             "wb_customer_transit_sync",
             "Возвраты WB в пути",
@@ -74,15 +106,7 @@ def job_definitions() -> tuple[SyncJobDefinition, ...]:
             "store_marketplaces",
             ("WB", "OZON", "YANDEX MARKET"),
         ),
-        SyncJobDefinition(
-            "inbound_supplies_sync",
-            "Поставки на склады маркетплейсов",
-            "Загружает поставки FBW, FBO и FBY, их товары, статусы и результаты приёмки по каждому магазину.",
-            _interval(settings.inbound_sync_interval_seconds),
-            base,
-            "store_marketplaces",
-            ("WB", "OZON", "YANDEX MARKET"),
-        ),
+        from_metadata(JOBS.inbound_supplies, base),
         SyncJobDefinition(
             "supply_arrivals_sync",
             "Табло поставок из Google Таблицы",
@@ -133,33 +157,16 @@ def job_definitions() -> tuple[SyncJobDefinition, ...]:
             "store_marketplaces",
             ("YANDEX MARKET",),
         ),
-        SyncJobDefinition(
-            "ozon_reputation_sync",
-            "Отзывы и рейтинг Ozon",
-            "Загружает оценки и отзывы товаров Ozon при наличии доступа к API отзывов.",
-            "Каждые сутки",
-            base,
-            "store_marketplaces",
-            ("OZON",),
-        ),
-        SyncJobDefinition(
-            "ozon_unit_economics_turnover_sync",
-            "ТО заказов Ozon",
-            "Обновляет заказы Ozon за последние 21 день и считает ТО за 7 дней после отмен.",
-            "Ежедневно в 03:00 МСК",
-            base,
-            "store_marketplaces",
-            ("OZON",),
-        ),
-        SyncJobDefinition(
-            "ozon_unit_economics_advertising_sync",
-            "Реклама Ozon",
-            "Загружает расходы, показы и клики по товарам за 7 завершённых дней из Performance API.",
-            "Ежедневно в 04:00 МСК",
-            base,
-            "store_marketplaces",
-            ("OZON",),
-        ),
+        from_metadata(JOBS.ozon_orders, base),
+        from_metadata(JOBS.ozon_prices, base),
+        from_metadata(JOBS.ozon_logistics, base),
+        from_metadata(JOBS.ozon_storage, base),
+        from_metadata(JOBS.ozon_buyout, base),
+        from_metadata(JOBS.ozon_margin, base),
+        from_metadata(JOBS.ozon_analytics_sources, base),
+        from_metadata(JOBS.ozon_ephemerides_stock, base),
+        from_metadata(JOBS.ozon_prices_close, base),
+        from_metadata(JOBS.ozon_advertising_breakdown, base),
         SyncJobDefinition(
             "yandex_advertising_sync",
             "Реклама Яндекс Маркета",
@@ -249,6 +256,21 @@ def job_definitions() -> tuple[SyncJobDefinition, ...]:
             "stores",
         ),
         SyncJobDefinition(
+            JOBS.wb_hourly_prices.name,
+            JOBS.wb_hourly_prices.title,
+            JOBS.wb_hourly_prices.description,
+            _interval(settings.wb_hourly_prices_interval_seconds),
+            settings.wb_hourly_prices_enabled,
+            "stores",
+        ),
+        SyncJobDefinition(
+            JOBS.wb_daily_prices.name,
+            JOBS.wb_daily_prices.title,
+            JOBS.wb_daily_prices.description,
+            JOBS.wb_daily_prices.schedule or "",
+            settings.wb_hourly_prices_enabled,
+        ),
+        SyncJobDefinition(
             "unit_economics_1c_daily_margin_snapshot_00_msk",
             "Дневная маржа WB",
             "Сохраняет наблюдения текущего дня, включая неполные параметры; история не восстанавливается текущими настройками.",
@@ -333,5 +355,15 @@ def job_definitions() -> tuple[SyncJobDefinition, ...]:
             _interval(settings.token_check_interval_seconds),
             base,
             "stores",
+        ),
+        SyncJobDefinition(
+            JOBS.wb_standard_costs.name,
+            JOBS.wb_standard_costs.title,
+            JOBS.wb_standard_costs.description,
+            f"Первый запуск через {settings.wb_standard_costs.startup_delay_seconds} сек., "
+            f"затем каждые {settings.wb_standard_costs.interval_seconds / 3600:g} ч.",
+            base,
+            "store_marketplaces",
+            ("WB",),
         ),
     )

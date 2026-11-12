@@ -8,8 +8,9 @@
 Количество — сумма товарных единиц
 FBS за 30 завершённых московских дней `[начало периода, начало дня выгрузки)`.
 
-Перед публикацией ЯМ/Ozon `refresh_fbs_order_totals` использует загрузчики и
-нормализаторы `app/stock/sales.py` в строгом режиме. Ozon запрашивает только FBS v4,
+Перед публикацией ЯМ/Ozon `refresh_fbs_order_totals` из `app/orders/sync.py`
+использует загрузчики в строгом режиме и преобразования из `app/orders/normalizers/`.
+Ozon запрашивает только FBS v4,
 без ограничения статусами и без зависимости от 21-дневной синхронизации экономики.
 ЯМ читает заказы кабинета со всеми статусами. Все страницы и части периода должны
 завершиться успешно; недостающий список, незавершённая пустая страница, повтор
@@ -49,11 +50,10 @@ Google `batchClear`/`batchUpdate` (F07) не входят в изменение.
 при проверке возвращала цикл перенаправлений; сохранён существующий адаптер v4,
 его завершённость (`has_next`/`cursor`) проверена синтетическими ответами.
 
-Проверки выполняются без `.env`, ключей и сети:
+Статическая проверка выполняется без `.env`, ключей и сети:
 
 ```powershell
-.venv/Scripts/python.exe -m unittest discover -s tests -p test_fbs_export.py -v
-.venv/Scripts/ruff.exe check app/exports/stock_sheet.py app/stock/sales.py app/repositories/sales.py app/yandex/api.py app/ozon/api.py tests/test_fbs_export.py
+.venv/Scripts/ruff.exe check app/exports/stock_sheet.py app/orders
 ```
 
 Проверены пустой реестр, полное окно и его части, московские границы и переход через

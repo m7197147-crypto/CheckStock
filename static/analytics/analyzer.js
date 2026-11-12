@@ -3,7 +3,10 @@
     const root = document.getElementById('analyzer');
     if (!root) return;
     const M = window.CheckStockAnalyzer;
-    const config = JSON.parse(document.getElementById('analyzer-config').textContent);
+    const config = M.marketplaceConfig(JSON.parse(document.getElementById('analyzer-config').textContent));
+    M.configure(config);
+    M.localize(root, config);
+    const market = config.labels.marketplace;
     const $ = id => root.querySelector('#' + id);
     const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
     const num = (value, digits = 0) => value == null ? '—' : Number(value).toLocaleString('ru-RU', {maximumFractionDigits: digits});
@@ -20,11 +23,15 @@
     const monday = day => addDays(day, -((new Date(day + 'T12:00:00Z').getUTCDay() + 6) % 7));
     let payload = null, rows = [], columns = [], loadedWeek = null, requestedWeek = monday(config.today);
     let pending = null, loading = false, selected = null, editingNoteId = null, noteSaving = false, toastTimer;
+    let coefficientRetryAfter = 0;
     const noteDrafts = new Map();
     const state = {query: '', project: '', manager: '', segment: 'all', filters: {}, sort: M.fields.find(column => column.key === 'fact').index, direction: -1, page: 1, pageSize: 20};
     const visibleGroups = new Set(Object.keys(M.groups));
+    const hiddenColumns = new Set();
+    state.color = 'all';
+    state.colorColumn = M.fields.find(column => column.key === 'difference').index;
     let summaryCollapsed = false;
-    const preferenceKey = 'checkstock.analyzer.columns.v1';
+    const preferenceKey = config.storageKey || 'checkstock.analyzer.columns.v1';
     try {
         const saved = JSON.parse(localStorage.getItem(preferenceKey) || 'null');
         if (saved) {
@@ -35,10 +42,13 @@
                 visibleGroups.clear();
                 saved.groups.forEach(group => { if (M.groups[group]) visibleGroups.add(group); });
             }
+            (saved.hiddenColumns || []).forEach(id => hiddenColumns.add(id));
+            if (!saved.hiddenColumns) visibleGroups.add('team');
         }
     } catch { /* Preferences are optional. */ }
+    visibleGroups.add('product');
     function savePreferences() {
-        try { localStorage.setItem(preferenceKey, JSON.stringify({dense: $('dense').checked, exact: $('sheet-order').checked, summaryCollapsed, groups: [...visibleGroups]})); } catch { /* Storage may be disabled. */ }
+        try { localStorage.setItem(preferenceKey, JSON.stringify({dense: $('dense').checked, exact: $('sheet-order').checked, summaryCollapsed, groups: [...visibleGroups], hiddenColumns: [...hiddenColumns]})); } catch { /* Storage may be disabled. */ }
     }
     function toast(text) {
         $('toast').textContent = text;
@@ -48,35 +58,42 @@
     }
     function label(column) {
         if (column.type === 'day' || column.type === 'note') return weekdays[column.idx] + '<br>' + shortDate(payload.week[column.idx]);
-        if (column.metric) return column.label + '<br>' + shortDate(payload.traffic_days[column.idx]);
+        if (column.metric) return (column.metric === 'carts' && config.marketplace === 'YANDEX MARKET' ? 'Корзины · дата отчёта' : column.metric === 'carts' && config.marketplace === 'OZON' ? 'Корзины · 03:00–03:00 МСК' : column.label) + '<br>' + shortDate(payload.traffic_days[column.idx]);
         if (['spend', 'yesterdayDrr'].includes(column.key)) return column.label.replace('вчера', shortDate(addDays(payload.anchor, -1)));
         return column.label;
     }
     function title(column) {
-        if (column.metric === 'impressions' || column.metric === 'ctr' || column.key === 'totalCtr') return 'Показы и CTR рекламных кампаний WB. CTR = клики / показы × 100%.';
+        if (config.marketplace !== 'WB' && ['coeff','forecast','difference','deviation'].includes(column.key)) return 'Собственный коэффициент D магазина для текущего часа Москвы. Пустое значение: прогноз и отклонение неизвестны. Заполните «Коэффициенты D».';
+        if (config.marketplace !== 'WB' && column.metric === 'carts') return config.marketplace === 'OZON' ? M.cartInterval(payload.traffic_days[column.idx]) + '. ' + config.labels.cartsHelp : config.labels.cartsHelp || (config.marketplace === 'YANDEX MARKET' ? 'Дата отчёта Маркета; границы суток не подтверждены. Данные могут быть предварительными и запаздывать; отсутствие строки не подтверждает ноль.' : 'Добавления в корзину по сохранённому отчёту площадки. Период и полнота источника определяют доступность значения.');
+        if (config.marketplace !== 'WB' && column.key === 'currentRoi') return 'Текущий ROI из сохранённых цен, расходов и настроек юнит-экономики ' + market + '.';
+        if (config.marketplace !== 'WB' && ['drr','yesterdayDrr'].includes(column.key)) return 'Реклама / (валовая сумма заказов × датированный выкуп) × 100%. Только совпадающие известные даты; отмены не вычитаются.';
+        if (column.metric === 'impressions' || column.metric === 'ctr' || column.key === 'totalCtr') return `Показы и CTR рекламных кампаний ${market}. CTR = клики / показы × 100%.`;
         if (column.metric === 'carts') return 'Все добавления товара в корзину за день, включая органические. Показатель карточки WB общий для её размеров; в итогах учитывается один раз.';
-        if (column.key === 'stock') return 'Последний сохранённый остаток: FBO + FBS + ФФ. Если часть источников отсутствует, показана известная часть.';
+        if (column.key === 'stock') return `Последний сохранённый остаток: ${config.labels.fbo} + FBS. Если часть источников отсутствует, показана известная часть.`;
+        if (column.key === 'currentRoi') return 'Текущий ROI из юнит-экономики WB: тот же расчёт за сегодня, с актуальными сохранёнными ценами, расходами и настройками.';
         if (column.key === 'roi') return 'ROI по дневным расчётам юнит-экономики за выбранную неделю. Неполные данные отмечены в карточке.';
         if (['drr', 'yesterdayDrr'].includes(column.key)) return 'Расход рекламы / ожидаемый выкупленный оборот × 100%, как в юнит-экономике WB. Только дни с известными исходными значениями.';
         if (column.key === 'previousPrice') return 'Сумма заказов / количество заказов за ' + shortDate(payload.previous_from) + '–' + shortDate(payload.previous_to) + '.';
-        if (column.key === 'coeff') return 'Коэффициент D временно равен 1 для всех товаров.';
+        if (column.key === 'coeff') return 'Коэффициент D для текущего часа по Москве из параметров кабинета WB. С 00:00 до 07:59 используется D = 1.';
+        if (config.marketplace !== 'WB' && column.key === 'fact') return 'Валовая сумма заказов за сегодня, отмены учтены отдельно. Полный артикул продавца.';
         if (column.key === 'fact') return 'Сумма заказов за сегодня (' + shortDate(payload.turnover_day) + ') из последней сохранённой воронки WB. Включает все размеры артикула WB; в итогах учитывается один раз.';
-        if (column.key === 'forecast') return 'Коэффициент D × ТО факт на данный момент за сегодня. Оборот всех размеров артикула WB учитывается в итогах один раз.';
-        if (column.key === 'difference') return 'ТО цель на день − прогнозируемый ТО на день.';
-        if (column.key === 'deviation') return '(ТО цель на день − прогнозируемый ТО на день) / ТО цель на день × 100%.';
+        if (column.key === 'forecast') return config.marketplace === 'WB' ? 'Коэффициент D × ТО факт на данный момент за сегодня. Оборот всех размеров артикула WB учитывается в итогах один раз.' : 'Коэффициент D × валовый ТО за сегодня; полный артикул продавца.';
+        if (column.key === 'difference') return 'Прогнозируемый ТО на день − ТО цель на день. Минус — ниже цели, плюс — выше цели.';
+        if (column.key === 'deviation') return '(Прогнозируемый ТО на день − ТО цель на день) / ТО цель на день × 100%.';
         if (column.key === 'plan') return 'Средняя цена заказов предыдущей выбранной недели × цель по заказам на день.';
         if (column.type === 'goal' || ['goal', 'dayGoal'].includes(column.key)) return 'Последняя сохранённая цель из справочника юнит-экономики. Если дневная цель отсутствует, используется недельная / 7.';
         return column.label.replace(/<br>/g, ' ');
     }
     function format(value, column) {
         if (value == null) return '—';
+        if (column.type === 'difference' || column.type === 'deviation') return (value > 0 ? '+' : '') + (column.type === 'deviation' ? pct(value) : money(value));
         if (['roi', 'drr', 'percent', 'deviation'].includes(column.type)) return pct(value);
         if (['money', 'difference'].includes(column.type)) return money(value);
         return num(value, ['decimal', 'rating'].includes(column.type) ? 2 : 0);
     }
     function photo(row) {
         const url = /^https?:\/\//i.test(row.image) || /^\/(?!\/)/.test(row.image) ? row.image : '';
-        return url ? `<img class="thumb" loading="lazy" src="${esc(url)}" alt="${esc(row.name)}">` : '<span class="thumb no-photo" aria-label="Нет фото">WB</span>';
+        return url ? `<img class="thumb" loading="lazy" src="${esc(url)}" alt="${esc(row.name)}">` : `<span class="thumb no-photo" aria-label="Нет фото">${esc(market)}</span>`;
     }
     function orderBadge(orders, goal) {
         const progress = M.orderProgress(orders, goal);
@@ -88,7 +105,10 @@
     }
     function cell(row, column) {
         const value = M.value(row, column);
-        if (column.key === 'product') return `<div class="product">${photo(row)}<div><button class="product-name" data-open="${esc(row.id)}" title="${esc(row.name)}">${esc(row.name)}</button><div class="product-meta"><span>WB</span><button data-copy="${esc(row.article)}" title="Копировать артикул">${esc(row.article)} ⧉</button></div><div class="product-barcode">${esc(row.barcode)}</div></div></div>`;
+        const help = M.metricHelp(row, column.key, config, value == null);
+        const status = M.qualityLabel(M.metricQuality(row, column.key));
+        const marker = status ? `<span class="cell-sub">${esc(status)}</span>` : '';
+        if (column.key === 'product') return `<div class="product">${photo(row)}<div><button class="product-name" data-open="${esc(row.id)}" title="${esc(row.name)}">${esc(row.name)}</button><div class="product-meta"><span>${esc(market)}</span><button data-copy="${esc(row.article)}" title="Копировать артикул">${esc(row.article)} ⧉</button></div><div class="product-barcode">${esc(row.barcode)}</div></div></div>`;
         if (column.type === 'photo') return photo(row);
         if (column.type === 'name') return `<button class="product-name" data-open="${esc(row.id)}">${esc(value)}</button>`;
         if (column.type === 'spacer') return '';
@@ -96,17 +116,25 @@
         if (column.type === 'project') return `<span class="project"><i></i>${esc(value)}</span>`;
         if (column.type === 'code') return value ? `<span class="code ${value.toUpperCase() === 'NEW' ? 'new' : ''}">${esc(value)}</span>` : '—';
         if (column.type === 'text') return esc(value) || '—';
-        if (column.type === 'goal') return `<div class="goal">${num(row.goal)}<span>/</span>${num(row.dayGoal, 1)} шт</div><span class="stock-status">${esc([row.stockStatus, row.stockEnds].filter(Boolean).join(' · '))}</span>`;
+        if (column.type === 'goal') return `<div title="${esc(M.metricHelp(row, 'goal', config, row.goal == null))}" class="goal">${num(row.goal)}<span>/</span>${num(row.dayGoal, 1)} шт</div><span class="stock-status">${esc([row.stockStatus, row.stockEnds].filter(Boolean).join(' · '))}</span>`;
         if (column.type === 'note') return `<button class="cell-note ${value ? '' : 'empty'}" data-note="${esc(row.id)}" data-day="${column.idx}" aria-label="Записи ${weekdays[column.idx]}: ${esc(row.name)}"><span class="note-content">${esc(value || (config.canEdit ? '+ Добавить запись' : 'Нет записей'))}</span></button>`;
-        if (value == null) return '<span class="empty-value">—</span>';
-        if (column.type === 'stock') return `<strong>${num(value)}</strong><span class="cell-sub" title="Сток / среднесуточные заказы за ${shortDate(payload.stockPreviousFrom)}–${shortDate(payload.stockPreviousTo)}">${row.stockDays != null ? '≈ ' + num(row.stockDays, 1) + ' дней запаса' : row.stockOrdersComplete && row.stockDailyOrders === 0 ? 'Нет заказов за прошлую неделю' : 'Запас дней: нет данных'}</span>`;
+        if (value == null) return `<span class="empty-value" title="${esc(help)}">—</span>${marker}`;
+        if (column.type === 'stock') return `<strong title="${esc(help)}">${num(value)}</strong>${marker}<span class="cell-sub" title="${esc('Сток / среднесуточные заказы за ' + shortDate(payload.stockPreviousFrom) + '–' + shortDate(payload.stockPreviousTo) + '. ' + M.metricHelp(row, 'stockDays', config, row.stockDays == null))}">${row.stockDays != null ? '≈ ' + num(row.stockDays, 1) + ' дней запаса' + (row.stockPartial === true ? ' · известная часть' : '') : row.stockOrdersComplete && row.stockDailyOrders === 0 ? 'Нет заказов за прошлую неделю' : 'Запас дней: нет данных'}</span>`;
         if (column.type === 'rating') return `<span class="rating">★</span> <strong>${num(value, 1)}</strong>`;
-        if (column.type === 'day') return orderBadge(value, row.dayGoal);
-        const partial = column.key === 'roi' && !row.coverage.roiComplete || column.key === 'drr' && row.coverage.drr < row.coverage.expected;
-        return `<span class="cell-main ${column.type === 'roi' ? value < 0 ? 'negative' : 'positive' : ''}">${format(value, column)}</span>${partial ? '<span class="cell-sub">неполные данные</span>' : ''}`;
+        if (column.type === 'day') return `<span title="${esc(help)}">${orderBadge(value, row.dayGoal)}</span>${marker}`;
+        if (['difference', 'deviation'].includes(column.type)) return `<span title="${esc(help)}" class="turnover-change ${value < 0 ? 'below' : value > 0 ? 'above' : ''}">${format(value, column)}</span>${marker}`;
+        return `<span title="${esc(help)}" class="cell-main ${column.type === 'roi' ? value < 0 ? 'negative' : value > 0 ? 'positive' : '' : ''}">${format(value, column)}</span>${marker}`;
     }
     function buildColumns() {
-        columns = M.displayColumns(visibleGroups, $('sheet-order').checked);
+        columns = M.displayColumns(visibleGroups, $('sheet-order').checked, 160, hiddenColumns);
+        const active = new Set(columns.map(column => column.index));
+        Object.keys(state.filters).forEach(index => { if (!active.has(Number(index))) delete state.filters[index]; });
+        if (!active.has(state.colorColumn)) state.color = $('color-filter').value = 'all';
+        $('color-column').innerHTML = columns.filter(column => ['roi', 'difference', 'deviation', 'day'].includes(column.type)).map(column => `<option value="${column.index}">${esc(label(column).replace(/<br>/g, ' '))}</option>`).join('');
+        $('color-column').disabled = $('color-filter').disabled = !$('color-column').options.length;
+        if (!active.has(state.colorColumn)) state.colorColumn = Number($('color-column').value);
+        $('color-column').value = state.colorColumn;
+        renderColumnSettings();
         root.classList.toggle('compact', $('dense').checked);
         $('table').style.width = columns.reduce((sum, column) => sum + column.width, 0) + 'px';
         $('cols').innerHTML = columns.map(column => `<col style="width:${column.width}px">`).join('');
@@ -117,7 +145,7 @@
         });
         const groupHeaders = groups.map(group => {
             const pinned = group.frozenLeft != null;
-            return `<th colspan="${group.columns.length}" data-section="${group.key}" class="tone-${group.key} ${pinned ? 'frozen' : ''}" ${pinned ? `style="left:${group.frozenLeft}px"` : ''}>${pinned ? group.columns[0].key === 'code' ? 'Код' : 'Товар' : group.key === 'product' ? 'Команда и проект' : M.groups[group.key]}</th>`;
+            return `<th colspan="${group.columns.length}" data-section="${group.key}" class="tone-${group.key} ${pinned ? 'frozen' : ''}" ${pinned ? `style="left:${group.frozenLeft}px"` : ''}>${pinned ? group.columns[0].key === 'code' ? 'Код' : 'Товар' : M.groups[group.key]}</th>`;
         }).join('');
         $('thead').innerHTML = `<tr class="group">${groupHeaders}</tr><tr class="heads">${columns.map(column => `<th ${columnAttributes(column)} ${column.type === 'spacer' ? '' : `data-filter-column="${column.index}" ${M.numeric(column) ? 'data-filter-type="number"' : ''}`} title="${esc(title(column))}">${label(column)}</th>`).join('')}</tr><tr class="totals"></tr>`;
         root.querySelectorAll('[data-jump]').forEach(button => { button.hidden = jumpColumnIndex(button) < 0; });
@@ -139,7 +167,7 @@
         $('summary-arrow').textContent = summaryCollapsed ? '▾' : '▴';
         if (!payload) return;
         const stores = summaryCollapsed && filtered.length ? [{project: 'Все магазины', ...M.turnoverTotals(filtered)}] : M.storeTurnover(filtered);
-        $('store-summary').innerHTML = stores.map(store => `<tr class="${summaryCollapsed ? 'summary-total' : ''}"><th scope="row">${esc(store.project)}</th>${['plan', 'fact', 'forecast', 'difference', 'deviation'].map(key => `<td title="${store.partial[key] ? 'Неполные данные: учтены только известные значения' : ''}">${key === 'deviation' ? pct(store[key]) : num(store[key], 2)}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="6">Нет товаров по выбранным фильтрам</td></tr>';
+        $('store-summary').innerHTML = stores.map(store => `<tr class="${summaryCollapsed ? 'summary-total' : ''}"><th scope="row">${esc(store.project)}</th>${['plan', 'fact', 'forecast', 'deviation', 'difference'].map(key => `<td class="${['difference', 'deviation'].includes(key) ? store[key] < 0 ? 'turnover-change below' : store[key] > 0 ? 'turnover-change above' : '' : ''}" title="${store.partial[key] ? 'Неполные данные: учтены только известные значения' : ''}">${['difference', 'deviation'].includes(key) && store[key] > 0 ? '+' : ''}${key === 'deviation' ? pct(store[key]) : num(store[key], 2)}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="6">Нет товаров по выбранным фильтрам</td></tr>';
     }
     function renderPage() {
         if (!payload) return;
@@ -148,8 +176,10 @@
         state.page = Math.min(Math.max(1, state.page), pages);
         const start = (state.page - 1) * state.pageSize;
         $('thead').querySelector('.totals').innerHTML = columns.map((column, i) => {
-            const value = M.summary(filtered, column);
-            return `<th ${columnAttributes(column)} title="Итоги по всем отфильтрованным товарам; неизвестные значения не включены">${i === 0 ? 'Итого · ' + filtered.length : value == null ? '' : format(value, column)}</th>`;
+            const total = M.summaryDetails(filtered, column), value = total.value;
+            const title = [M.qualityHelp(total), total.includedCards != null ? `Учтено товаров ${market}: ${total.includedCards}. Без пары исходных значений: ${total.missingCards}. Исключено из-за различий исходных значений размеров: ${total.conflictingCards}.` : 'Итоги по всем отфильтрованным товарам; неизвестные значения не включены'].filter(Boolean).join('. ');
+            const status = M.qualityLabel(total);
+            return `<th ${columnAttributes(column)} title="${esc(title)}">${i === 0 ? 'Итого · ' + filtered.length : value == null && !status ? '' : `<span class="${['difference', 'deviation'].includes(column.type) ? 'turnover-change ' + (value < 0 ? 'below' : value > 0 ? 'above' : '') : ''}">${format(value, column)}</span>${status ? `<span class="cell-sub">${esc(status)}</span>` : ''}`}</th>`;
         }).join('');
         $('tbody').innerHTML = filtered.slice(start, start + state.pageSize).map(row => `<tr data-row="${esc(row.id)}" class="${selected?.id === row.id ? 'selected' : ''}">${columns.map(column => `<td ${columnAttributes(column, ['product', 'person', 'name', 'text', 'note', 'goal'].includes(column.type) ? 'text' : ['project', 'code', 'photo', 'day'].includes(column.type) ? 'center' : '')}>${cell(row, column)}</td>`).join('')}</tr>`).join('');
         renderStoreSummary(filtered);
@@ -166,7 +196,7 @@
         filter: filters => { state.filters = filters || {}; state.page = 1; renderPage(); },
         sort: (idx, direction) => { state.sort = Number(idx); state.direction = direction === 'desc' ? -1 : 1; state.page = 1; renderPage(); },
     };
-    async function loadWeek(week) {
+    async function loadWeek(week, refresh = false) {
         pending?.abort();
         const controller = new AbortController();
         pending = controller;
@@ -176,22 +206,28 @@
         $('load-status').hidden = false;
         $('load-status').textContent = 'Загрузка данных за ' + shortDate(week) + '–' + shortDate(addDays(week, 6)) + '…';
         $('export').disabled = true;
-        closeDrawer();
+        if (!refresh) closeDrawer();
         try {
-            const response = await fetch('/api/analytics/analyzer?week=' + encodeURIComponent(week), {signal: controller.signal, headers: {'Accept': 'application/json'}});
+            const response = await fetch(config.apiBase + '/analyzer?week=' + encodeURIComponent(week), {signal: controller.signal, headers: {'Accept': 'application/json'}});
             const body = await response.json();
             if (!response.ok || !body.ok) throw new Error(body.detail || body.error || 'Не удалось загрузить данные');
             if (controller !== pending) return;
+            const selectedId = refresh && selected ? selected.id : null;
+            if (selectedId) rememberDraft();
             payload = body;
+            config.today = body.today;
             rows = body.rows;
             loadedWeek = body.week[0];
-            state.page = 1;
-            state.filters = {};
+            if (!refresh) {
+                state.page = 1;
+                state.filters = {};
+            }
             $('week-label').textContent = shortDate(body.week[0]) + '–' + shortDate(body.week[6]) + ' ' + body.week[6].slice(0, 4);
             $('week-caption').textContent = loadedWeek === monday(body.today) ? 'Текущая неделя' : 'Выбранная неделя';
             $('load-status').hidden = true;
             loading = false;
             buildColumns();
+            if (selectedId) openDrawer(selectedId);
         } catch (error) {
             if (error.name === 'AbortError') return;
             $('load-status').textContent = `${error.message}. ${payload ? 'На экране осталась ранее загруженная неделя. ' : ''}`;
@@ -224,7 +260,7 @@
         const barsMax = Math.max(1, ...row.week.filter(value => value != null));
         $('drawer-body').innerHTML = `<div class="drawer-product">${photo(row)}<div><h2>${esc(row.name)}</h2><p>${esc(row.project)} · ${esc(row.article)}<br>${esc(row.barcode)}</p></div></div>
             <details class="product-metrics"><summary>Показатели и заказы за неделю</summary>
-            <div class="detail-metrics"><div><small>Сток${row.stockPartial ? ' · известная часть' : ''}</small><strong>${num(row.stock)}</strong><small>${row.stockDays != null ? '≈ ' + num(row.stockDays, 1) + ' дней запаса' : 'Запас дней не рассчитан'}</small></div><div><small>Заказов в сутки · ${shortDate(payload.stockPreviousFrom)}–${shortDate(payload.stockPreviousTo)}</small><strong>${num(row.stockDailyOrders, 1)}</strong></div><div><small>РОИ · накопительный итог</small><strong>${pct(row.roi)}</strong></div><div><small>ДРР · накопительный итог</small><strong>${pct(row.drr)}</strong></div></div>
+            <div class="detail-metrics"><div><small>Сток${row.stockPartial ? ' · известная часть' : ''}</small><strong>${num(row.stock)}</strong><small>${row.stockDays != null ? '≈ ' + num(row.stockDays, 1) + ' дней запаса' : 'Запас дней не рассчитан'}</small></div><div><small>Заказов в сутки · ${shortDate(payload.stockPreviousFrom)}–${shortDate(payload.stockPreviousTo)}</small><strong>${num(row.stockDailyOrders, 1)}</strong></div><div><small>РОИ · накопительный итог</small><strong>${pct(row.roi)}</strong><small>${esc(M.qualityHelp(M.metricQuality(row, 'roi')))}</small></div><div><small>ДРР · накопительный итог</small><strong>${pct(row.drr)}</strong><small>${esc(M.qualityHelp(M.metricQuality(row, 'drr')))}</small></div></div>
             <p class="data-coverage">Заказы: ${row.coverage.orders}/${row.coverage.expected} дней · Реклама: ${row.coverage.advertising}/${row.coverage.expected} дней.<br>${row.coverage.roiComplete ? 'Данные ROI полные.' : 'ROI рассчитан по доступным данным.'}</p>
             ${!row.coverage.roiComplete ? `<details class="coverage-details"><summary>Каких данных не хватает для ROI</summary>${row.coverage.roiMessages.map(message => `<p>${esc(message)}</p>`).join('') || '<p>Недостаточно исходных данных.</p>'}</details>` : ''}
             <h3>Заказы по дням</h3><div class="days-bars">${row.week.map((value, idx) => `<div class="bar ${payload.week[idx] === payload.today ? 'current' : ''}" style="height:${value == null ? 3 : Math.max(3, value / barsMax * 80)}px"><b>${num(value)}</b><small>${weekdays[idx]}</small></div>`).join('')}</div>
@@ -232,7 +268,7 @@
             <h3>Комментарии · ${shortDate(payload.week[0])}–${shortDate(payload.today)}</h3>
             <div id="note-history" class="note-history"></div>
             ${config.canEdit ? `<div class="note-editor-heading"><label for="note-input" id="note-editor-label">Комментарий на сегодня · ${shortDate(payload.today)}</label><button type="button" class="note-edit" id="new-note">Новая запись</button></div><textarea id="note-input" maxlength="4000" placeholder="Что сделали, что проверить, план действий"></textarea>` : '<p>Доступ только для просмотра записей.</p>'}
-            <details class="source-details"><summary>Сохранённые данные</summary>${Object.entries({stock: 'Каталог', prices: 'Цена', reference: 'Цели и справочник', orders: 'Заказы', advertising: 'Реклама'}).map(([key, name]) => `<p>${name}: ${dateTime(row.updated[key])}</p>`).join('')}<p>ТО факт за ${shortDate(payload.turnover_day)}: ${money(row.fact)}. Коэф D = 1.</p></details>`;
+            <details class="source-details"><summary>Сохранённые данные</summary>${Object.entries({stock: 'Каталог', prices: 'Цена', reference: 'Цели и справочник', orders: 'Заказы', advertising: 'Реклама'}).map(([key, name]) => `<p>${name}: ${dateTime(row.updated[key])}</p>`).join('')}<p>ТО факт за ${shortDate(payload.turnover_day)}: ${money(row.fact)}. Коэф D = ${num(row.coeff, 2)} на ${num(payload.coefficient_hour)}:00 МСК.</p></details>`;
         $('save-note').hidden = !config.canEdit;
         $('save-note').disabled = noteSaving;
         $('drawer').hidden = false;
@@ -259,7 +295,7 @@
         $('note-editor-label').textContent = (editingNoteId != null ? 'Изменить комментарий' : 'Новый комментарий') + ' · ' + shortDate(payload.today);
     }
     function renderNotes() {
-        $('note-history').innerHTML = (selected.noteHistory || []).map(note => `<article data-date="${esc(note.action_date)}"><div class="note-heading"><strong>${shortDate(note.action_date)}.${note.action_date.slice(0, 4)}</strong>${config.canEdit && note.can_edit ? `<button class="note-edit" data-edit-note="${note.id}">Изменить</button>` : ''}</div><p>${esc(note.note)}</p><small>${esc(note.user_name)} · ${esc(dateTime(note.created_at))}</small>${note.updated_at ? `<small>Изменено: ${esc(note.updated_by)} · ${esc(dateTime(note.updated_at))}</small>` : ''}</article>`).join('') || '<p class="muted">С начала выбранной недели записей пока нет.</p>';
+        $('note-history').innerHTML = (selected.noteHistory || []).map(note => `<article data-date="${esc(note.action_date)}"><div class="note-heading"><strong>${shortDate(note.action_date)}.${note.action_date.slice(0, 4)}</strong>${config.canEdit && note.can_edit ? `<button class="note-edit" data-edit-note="${note.id}">Изменить</button>` : ''}</div><p>${esc(note.note)}</p><small>${esc(note.user_name)} · ${esc(dateTime(note.created_at))}</small>${note.updated_at ? `<small>Изменено: ${esc(note.updated_by)} · ${esc(dateTime(note.updated_at))}</small>` : ''}${config.marketplace !== 'WB' && note.revisions?.length ? `<details><summary>История изменений</summary>${note.revisions.map(revision => `<p>${esc(revision.previous_note)} → ${esc(revision.note)}</p><small>${esc(revision.user_name)} · ${esc(dateTime(revision.edited_at))}</small>`).join('')}</details>` : ''}</article>`).join('') || '<p class="muted">С начала выбранной недели записей пока нет.</p>';
         $('note-history').querySelectorAll('[data-edit-note]').forEach(button => button.onclick = () => {
             if (noteSaving) return;
             const note = selected.noteHistory.find(note => note.id === Number(button.dataset.editNote));
@@ -277,9 +313,10 @@
         textArea.disabled = true;
         $('new-note').disabled = true;
         try {
-            const response = await fetch('/api/analytics/analyzer/notes' + (noteId != null ? '/' + noteId : ''), {method: noteId != null ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(noteId != null ? {note} : {store: row.store_slug, article: row.article, day: payload.today, note})});
+            const previousNote = row.noteHistory?.find(item => item.id === noteId)?.note;
+            const response = await fetch(config.apiBase + '/analyzer/notes' + (noteId != null ? '/' + noteId : ''), {method: noteId != null ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(noteId != null ? {note, ...(config.marketplace !== 'WB' ? {previous_note: previousNote} : {})} : {store: row.store_slug, article: row.article, day: payload.today, note})});
             const body = await response.json();
-            if (!response.ok || !body.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Не удалось сохранить запись');
+            if (!response.ok || !body.ok) throw new Error(typeof body.detail === 'string' ? M.reasonMessage(body.detail) : 'Не удалось сохранить запись');
             row.noteHistory = [...(row.noteHistory || []).filter(item => item.id !== body.note.id), body.note].sort((a, b) => a.action_date.localeCompare(b.action_date) || a.created_at.localeCompare(b.created_at) || a.id - b.id);
             const day = payload.week.indexOf(body.note.action_date);
             if (day >= 0) row.notes[day] = row.noteHistory.filter(note => note.action_date === body.note.action_date);
@@ -296,17 +333,20 @@
             if ($('new-note')) $('new-note').disabled = false;
         }
     });
-    $('groups-list').innerHTML = Object.entries(M.groups).map(([key, name]) => `<label><input type="checkbox" data-group="${key}" ${visibleGroups.has(key) ? 'checked' : ''}>${name}</label>`).join('');
-    root.querySelectorAll('[data-group]').forEach(input => input.addEventListener('change', () => {
-        if (!input.checked && visibleGroups.size === 1) { input.checked = true; return; }
-        if (input.checked) visibleGroups.add(input.dataset.group); else visibleGroups.delete(input.dataset.group);
-        // Hidden filters must not silently exclude products.
-        M.fields.filter(column => !visibleGroups.has(column.group)).forEach(column => { delete state.filters[column.index]; });
-        if (!visibleGroups.has('product')) delete state.filters[M.combined.index];
-        if (payload) buildColumns();
-    }));
-    $('show-all').onclick = () => { Object.keys(M.groups).forEach(key => visibleGroups.add(key)); root.querySelectorAll('[data-group]').forEach(input => { input.checked = true; }); if (payload) buildColumns(); };
-    $('sheet-order').onchange = () => { state.filters = {}; if (payload) buildColumns(); };
+    function renderColumnSettings() {
+        const expanded = new Set([...$('groups-list').querySelectorAll('details[open]')].map(item => item.dataset.section));
+        $('groups-list').innerHTML = Object.entries(M.groups).map(([key, name]) => `<details data-section="${key}" ${expanded.has(key) ? 'open' : ''}><summary>${esc(name)}</summary><label><input type="checkbox" data-group="${key}" ${visibleGroups.has(key) ? 'checked' : ''} ${key === 'product' ? 'disabled' : ''}>Показать блок</label><div class="column-choices">${M.fields.filter(column => column.group === key && column.type !== 'spacer' && ($('sheet-order').checked || !['barcode', 'article', 'image'].includes(column.key))).map(column => `<label><input type="checkbox" data-column="${M.columnId(column)}" ${!hiddenColumns.has(M.columnId(column)) || column.key === 'name' ? 'checked' : ''} ${column.key === 'name' || !visibleGroups.has(key) ? 'disabled' : ''}>${esc(column.key === 'name' && !$('sheet-order').checked ? 'Карточка товара' : payload ? label(column).replace(/<br>/g, ' ') : column.label.replace(/<br>/g, ' ') || column.key)}</label>`).join('')}</div></details>`).join('');
+    }
+    renderColumnSettings();
+    $('groups-list').onchange = event => {
+        const input = event.target;
+        if (input.dataset.group && input.dataset.group !== 'product') input.checked ? visibleGroups.add(input.dataset.group) : visibleGroups.delete(input.dataset.group);
+        if (input.dataset.column) input.checked ? hiddenColumns.delete(input.dataset.column) : hiddenColumns.add(input.dataset.column);
+        state.page = 1;
+        if (payload) { buildColumns(); renderPage(); } else { renderColumnSettings(); savePreferences(); }
+    };
+    $('show-all').onclick = () => { Object.keys(M.groups).forEach(key => visibleGroups.add(key)); hiddenColumns.clear(); if (payload) { buildColumns(); renderPage(); } else { renderColumnSettings(); savePreferences(); } };
+    $('sheet-order').onchange = () => { state.filters = {}; if (payload) { buildColumns(); renderPage(); } else renderColumnSettings(); };
     $('dense').onchange = () => { root.classList.toggle('compact', $('dense').checked); savePreferences(); };
     function toggleColumns(open) {
         $('column-panel').hidden = !open;
@@ -334,11 +374,14 @@
         state.query = state.project = state.manager = '';
         $('search').value = '';
         state.filters = {};
+        state.color = $('color-filter').value = 'all';
         $('table')._tfFilters = {};
         root.querySelector('[data-state="all"]').click();
         buildColumns();
     };
     $('page-size').onchange = event => { state.pageSize = Number(event.target.value); state.page = 1; renderPage(); };
+    $('color-filter').onchange = () => { state.color = $('color-filter').value; state.page = 1; renderPage(); };
+    $('color-column').onchange = () => { state.colorColumn = Number($('color-column').value); state.page = 1; renderPage(); };
     $('page-prev').onclick = () => { state.page--; renderPage(); };
     $('page-next').onclick = () => { state.page++; renderPage(); };
     $('prev-week').onclick = () => loadWeek(addDays(requestedWeek, -7));
@@ -370,15 +413,77 @@
     $('export').onclick = () => {
         if (!payload || loading) return;
         const exported = M.fields.filter(column => column.type !== 'spacer');
-        const lines = [exported.map(column => label(column).replace(/<br>/g, ' '))];
-        M.tableRows(rows, state).forEach(row => lines.push(exported.map(column => column.type === 'photo' ? row.image : M.value(row, column))));
+        const lines = M.qualityCsv(M.tableRows(rows, state), exported,
+            (row, column) => column.type === 'photo' ? row.image : M.value(row, column),
+            column => label(column).replace(/<br>/g, ' '), undefined, config.qualityExport);
         const blob = new Blob(['\uFEFF' + lines.map(line => line.map(M.csvCell).join(';')).join('\r\n')], {type: 'text/csv;charset=utf-8'});
         const url = URL.createObjectURL(blob), link = document.createElement('a');
         link.href = url;
-        link.download = `wb-analyzer-${loadedWeek}.csv`;
+        link.download = `${config.exportPrefix}-analyzer-${loadedWeek}.csv`;
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
         toast('Экспортированы все отфильтрованные товары');
     };
+    function refreshHourlyCoefficient() {
+        if (document.hidden || loading || noteSaving || !payload?.coefficient_valid_until) return;
+        if (Date.now() < coefficientRetryAfter || Date.now() < Date.parse(payload.coefficient_valid_until)) return;
+        coefficientRetryAfter = Date.now() + 60000;
+        loadWeek(requestedWeek, true);
+    }
+    setInterval(refreshHourlyCoefficient, 1000);
+    document.addEventListener('visibilitychange', refreshHourlyCoefficient);
+    if (config.hourlySettings) {
+        const dialog = document.getElementById('hourly-settings');
+        const storeSelect = document.getElementById('hourly-store');
+        const status = document.getElementById('hourly-status');
+        const fields = document.getElementById('hourly-fields');
+        const save = document.getElementById('hourly-save');
+        let revision = 0, selectedStore = '', requestId = 0;
+        const readSettings = async () => {
+            const id = ++requestId;
+            selectedStore = storeSelect.value;
+            save.disabled = true;
+            status.textContent = 'Загрузка…';
+            try {
+                const response = await fetch(config.apiBase + '/settings/' + encodeURIComponent(selectedStore));
+                const body = await response.json();
+                if (id !== requestId) return;
+                if (!response.ok) throw new Error(body.detail || 'Не удалось загрузить коэффициенты');
+                revision = body.revision;
+                const values = new Map(body.hourly_d_coefficients.map(item => [item.hour,item.value]));
+                fields.innerHTML = Array.from({length:24}, (_,hour) => `<label>${String(hour).padStart(2,'0')}:00 <input aria-label="Коэффициент ${hour}:00" data-hour="${hour}" type="number" min="0" max="${config.maxD || 100}" step="any" value="${values.get(hour) ?? ''}" style="width:75px"></label>`).join('');
+                status.textContent = '';
+                save.disabled = false;
+            } catch (error) { if (id === requestId) status.textContent = error.message; }
+        };
+        const open = document.getElementById('hourly-settings-open');
+        open.hidden = false;
+        open.onclick = () => {
+            if (!payload) return;
+            const stores = payload.stores || [...new Set(rows.map(row => row.store_slug))];
+            storeSelect.innerHTML = stores.map(store => `<option value="${esc(store)}">${esc(rows.find(row => row.store_slug === store)?.project || store)}</option>`).join('');
+            dialog.showModal();
+            readSettings();
+        };
+        storeSelect.onchange = readSettings;
+        document.getElementById('hourly-reload').onclick = readSettings;
+        save.onclick = async () => {
+            const hourly_d_coefficients = [...fields.querySelectorAll('[data-hour]')].map(input => ({hour:Number(input.dataset.hour), value:input.value === '' ? null : Number(input.value)}));
+            if (hourly_d_coefficients.some(item => item.value !== null && (!Number.isFinite(item.value) || item.value < 0))) { status.textContent = 'Введите конечные неотрицательные числа.'; return; }
+            const store = selectedStore;
+            save.disabled = true;
+            storeSelect.disabled = true;
+            try {
+                const response = await fetch(config.apiBase + '/settings/' + encodeURIComponent(store), {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({hourly_d_coefficients,revision})});
+                const body = await response.json();
+                if (response.status === 409) throw new Error('Коэффициенты уже изменены. Ваш ввод сохранён в форме; загрузите сохранённую версию для сравнения.');
+                if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Не удалось сохранить коэффициенты');
+                revision = body.revision;
+                status.textContent = 'Сохранено';
+                loadWeek(requestedWeek, true);
+            } catch (error) { status.textContent = error.message; }
+            finally { save.disabled = false; storeSelect.disabled = false; }
+        };
+    }
     loadWeek(requestedWeek);
 })();

@@ -1,7 +1,8 @@
 PYTHON ?= python
 UVICORN ?= uvicorn
+COMPOSE = docker compose --env-file .env -f deploy/docker-compose.yml
 
-.PHONY: install install-dev run format lint check docker-build docker-up docker-down docker-logs
+.PHONY: install install-dev run scheduler format lint typecheck check docker-build docker-up docker-down docker-logs
 
 install:
 	$(PYTHON) -m pip install -r requirements.txt
@@ -12,24 +13,30 @@ install-dev:
 run:
 	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 
+scheduler:
+	$(PYTHON) -m app.jobs.worker
+
 format:
-	$(PYTHON) -m ruff format app scripts
-	$(PYTHON) -m ruff check --fix app scripts
+	$(PYTHON) -m ruff format app scripts run.py
+	$(PYTHON) -m ruff check --fix app scripts run.py
 
 lint:
-	$(PYTHON) -m ruff format --check app scripts
-	$(PYTHON) -m ruff check app scripts
+	$(PYTHON) -m ruff format --check app scripts run.py
+	$(PYTHON) -m ruff check app scripts run.py
 
-check: lint
+typecheck:
+	$(PYTHON) -m mypy
+
+check: lint typecheck
 
 docker-build:
-	docker compose build
+	$(COMPOSE) build
 
 docker-up:
-	docker compose up --build -d
+	$(COMPOSE) up --build -d
 
 docker-down:
-	docker compose down
+	$(COMPOSE) down
 
 docker-logs:
-	docker compose logs --follow app
+	$(COMPOSE) logs --follow app scheduler

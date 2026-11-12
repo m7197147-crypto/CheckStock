@@ -310,6 +310,17 @@ html.sidebar-collapsed .app-header .nav-group.is-open .nav-submenu {
     background: #ffe765;
 }
 
+.app-header #nav-reports-submenu .marketplace-report-ozon {
+    color: #11324a;
+    background: #80d4ff;
+}
+
+.app-header #nav-reports-submenu .marketplace-report-ozon:hover,
+.app-header #nav-reports-submenu .marketplace-report-ozon.active {
+    color: #11324a;
+    background: #abe4ff;
+}
+
 .app-header .sidebar-bottom {
     min-width: 0;
     margin: 0;
@@ -410,7 +421,8 @@ body[data-section='unit_economics_1c'] .content--unit-1c {
     height: calc(100vh - var(--app-header-height));
 }
 
-body[data-section='unit_economics_1c'] .ue1c-drawer {
+body[data-section='unit_economics_1c'] .ue1c-drawer,
+body[data-section='unit_1c_ozon'] .ue1c-drawer {
     top: var(--app-header-height);
     z-index: 190;
     height: calc(100vh - var(--app-header-height));

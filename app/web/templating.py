@@ -3,8 +3,7 @@ import re
 from string import Template
 
 from app import db
-from app.access import auth
-from app.access.access_control import accessible_marketplaces
+from app.access.authentication import is_active_user
 from app.access.sections import (
     ANALYTICS_SECTIONS,
     REPORT_SECTIONS,
@@ -12,16 +11,14 @@ from app.access.sections import (
     SECTION_PARENTS,
     STOCK_SECTIONS,
     UNIT_ECONOMICS_SECTIONS,
-    access_level,
     active_section,
-    has_access,
     section_path,
 )
 from app.config import settings
 from app.core import health
 from app.core.formatting import format_dt
 from app.core.stores import STORES
-from app.dto.identity import SectionAccessLevel, SectionName
+from app.dto.identity import SectionName
 from app.wb import token_watch
 from app.web.access import accessible_store_slugs
 from app.web.client_templates import render_client_templates
@@ -60,11 +57,11 @@ def render_access_denied_page(
         heading = heading or "Нет доступа к вкладке"
         description = description or (
             f"Вкладка «{section_label}» недоступна для вашей учётной записи. "
-            "Если она нужна для работы, обратитесь к суперадминистратору."
+            "Проверьте адрес страницы и состояние учётной записи."
         )
     else:
         heading = heading or "Нет доступных разделов"
-        description = description or ("Обратитесь к суперадминистратору, чтобы он открыл нужные разделы.")
+        description = description or "Проверьте адрес страницы и повторите вход в систему."
     content = fill_template(
         "auth/access-denied.html",
         heading=html.escape(heading),
@@ -174,7 +171,7 @@ def render_page(
     page_styles = "\n".join(dict.fromkeys(stylesheet.findall(content)))
     content = stylesheet.sub("", content)
     admin_link = ""
-    if auth.has_role(user, "admin") and has_access(user, SectionName.ADMIN_USERS):
+    if is_active_user(user):
         admin_cls = "active" if active == "admin" else ""
         admin_link = (
             f'                <a class="nav-item {admin_cls}" href="/admin" title="Админ-панель" aria-label="Админ-панель">'
@@ -183,7 +180,7 @@ def render_page(
             '<path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"></path>'
             "</svg><span>Админ</span></a>"
         )
-    if auth.has_role(user, "superadmin"):
+    if is_active_user(user):
         integrations_cls = "active" if active in {"admin_integrations", "admin_google_export"} else ""
         admin_link += (
             f'                <a class="nav-item {integrations_cls}" href="/admin/integrations" '
@@ -202,7 +199,6 @@ def render_page(
         "stock_total",
         "stock_supplies",
         "stock_inbound",
-        "stock_randomizer",
         "stock_cost_report",
     }
     unit_1c_open = active in {
@@ -212,28 +208,34 @@ def render_page(
         "unit_1c_yandex",
     }
     reports_open = active in {
+        "wb_standard_costs",
         "unit_1c_reports",
+        "unit_1c_spp_report",
+        "unit_1c_rating_report",
         "unit_1c_target_price",
         "unit_1c_reports_yandex",
         "unit_1c_target_price_yandex",
     }
-    visible = {section: has_access(user, section) for section in SectionName}
+    visible = {section: is_active_user(user) for section in SectionName}
     current_section = active_section(active)
-    current_access = (
-        access_level(user, current_section) if current_section is not None else SectionAccessLevel.WRITE
-    )
 
     def hidden(allowed: bool) -> str:
         return "" if allowed else " hidden"
 
     marketplace = {
+        "wb_standard_costs": ("wb", "WB", "Wildberries"),
         "analytics_sales_api": ("wb", "WB", "Wildberries"),
         "analyzer": ("wb", "WB", "Wildberries"),
+        "yandex_analyzer": ("ym", "Я", "Яндекс Маркет"),
+        "yandex_ephemerides": ("ym", "Я", "Яндекс Маркет"),
+        "yandex_sales_api": ("ym", "Я", "Яндекс Маркет"),
         "ephemerides": ("wb", "WB", "Wildberries"),
         "unit_1c_wb": ("wb", "WB", "Wildberries"),
         "unit_1c_ozon": ("ozon", "O", "Ozon"),
         "unit_1c_yandex": ("ym", "Я", "Яндекс Маркет"),
         "unit_1c_reports": ("wb", "WB", "Wildberries"),
+        "unit_1c_spp_report": ("wb", "WB", "Wildberries"),
+        "unit_1c_rating_report": ("wb", "WB", "Wildberries"),
         "unit_1c_target_price": ("wb", "WB", "Wildberries"),
         "unit_1c_reports_yandex": ("ym", "Я", "Яндекс Маркет"),
         "unit_1c_target_price_yandex": ("ym", "Я", "Яндекс Маркет"),
@@ -243,7 +245,7 @@ def render_page(
         color, mark, label = marketplace
         marketplace_section = (
             "Аналитика"
-            if active in {"analyzer", "analytics_sales_api", "ephemerides"}
+            if active in {item.value for item in ANALYTICS_SECTIONS}
             else "Отчёты"
             if reports_open
             else "Юнит-экономика"
@@ -261,7 +263,10 @@ def render_page(
         marketplace_header_class=" marketplace-" + marketplace[0] if marketplace else "",
         marketplace_badge=marketplace_badge,
         analytics_hidden=hidden(any(visible[item] for item in ANALYTICS_SECTIONS)),
-        analytics_active="active" if active in {"analyzer", "analytics_sales_api", "ephemerides"} else "",
+        analytics_active="active" if active in {item.value for item in ANALYTICS_SECTIONS} else "",
+        yandex_analyzer_active="active" if active == "yandex_analyzer" else "",
+        yandex_ephemerides_active="active" if active == "yandex_ephemerides" else "",
+        yandex_sales_api_active="active" if active == "yandex_sales_api" else "",
         ephemerides_hidden=hidden(visible[SectionName.EPHEMERIDES]),
         ephemerides_active="active" if active == "ephemerides" else "",
         analyzer_hidden=hidden(visible[SectionName.ANALYZER]),
@@ -280,11 +285,15 @@ def render_page(
         unit_1c_wb_active="active" if active == "unit_1c_wb" else "",
         unit_1c_ozon_active="active" if active == "unit_1c_ozon" else "",
         unit_1c_yandex_active="active" if active == "unit_1c_yandex" else "",
+        wb_conditions_active="active" if active == "wb_standard_costs" else "",
+        wb_conditions_hidden=hidden(visible[SectionName.REPORT_WB_CONDITIONS]),
         reports_open="",
         reports_expanded="false",
         reports_group_hidden=hidden(any(visible[item] for item in REPORT_SECTIONS)),
         reports_group_active="active" if reports_open else "",
         unit_1c_reports_active="active" if active == "unit_1c_reports" else "",
+        unit_1c_spp_report_active="active" if active == "unit_1c_spp_report" else "",
+        unit_1c_rating_report_active="active" if active == "unit_1c_rating_report" else "",
         unit_1c_target_price_active="active" if active == "unit_1c_target_price" else "",
         ai_agents_active="active" if active == "ai_agents" else "",
         ai_agents_hidden=hidden(visible[SectionName.AI_AGENTS]),
@@ -298,10 +307,6 @@ def render_page(
         stock_inbound_hidden=hidden(visible[SectionName.STOCK_INBOUND]),
         stock_arrivals_active="active" if active == "stock_arrivals" else "",
         stock_arrivals_hidden=hidden(visible[SectionName.STOCK_ARRIVALS]),
-        stock_randomizer_active="active" if active == "stock_randomizer" else "",
-        stock_randomizer_hidden=hidden(
-            visible[SectionName.STOCK_RANDOMIZER] and "WB" in accessible_marketplaces(user)
-        ),
         stock_cost_report_active="active" if active == "stock_cost_report" else "",
         stock_cost_report_hidden=hidden(visible[SectionName.STOCK_COST_REPORT]),
         stock_operations_active="active" if active == "stock_operations" else "",
@@ -315,10 +320,11 @@ def render_page(
         unit_1c_reports_yandex_hidden=hidden(visible[SectionName.REPORT_UNIT_PROFIT_YANDEX]),
         unit_1c_target_price_yandex_hidden=hidden(visible[SectionName.REPORT_TARGET_PRICE_YANDEX]),
         unit_1c_reports_hidden=hidden(visible[SectionName.REPORT_UNIT_PROFIT]),
+        unit_1c_spp_report_hidden=hidden(visible[SectionName.REPORT_SPP]),
+        unit_1c_rating_report_hidden=hidden(visible[SectionName.REPORT_RATING]),
         unit_1c_target_price_hidden=hidden(visible[SectionName.REPORT_TARGET_PRICE]),
         admin_link=admin_link,
         user_name=html.escape(full_name),
-        user_role=html.escape(db.ROLE_LABELS.get(user["role"], user["role"])) if user else "",
         user_initials=html.escape(user_initials),
         profile_active="profile--active" if active == "profile" else "",
     )
@@ -333,7 +339,6 @@ def render_page(
             if current_section is not None and not active.startswith("admin")
             else active
         ),
-        access_level=current_access.value,
         client_templates=render_client_templates(read_template("layout/page.html") + content),
         page_styles=page_styles,
     )

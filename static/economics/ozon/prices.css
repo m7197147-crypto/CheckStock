@@ -1,0 +1,95 @@
+.is-ozon-preview .ue1c-calculator-inputs .ue1c-calculator-row[hidden] { display: none; }
+.is-ozon-preview .ue1c-placeholder-chart[hidden] { display: none; }
+.ozon-price-row.has-source-issue > span:first-child { color: var(--ue-muted); }
+.ozon-calculator-status { order: 0; grid-column: 1 / -1; color: var(--ue-negative, #b42318); font-size: 12px; }
+.ozon-calculator-status[hidden] { display: none; }
+.ozon-scenario-note { order: 30; grid-column: 1 / -1; color: var(--ue-muted); font-size: 12px; line-height: 1.4; }
+.ozon-scenario-note.is-error { color: var(--ue-negative, #b42318); }
+.is-ozon-preview #ue1c-panel-economics > .ue1c-calculator:not(.ue1c-drawer-section) { overflow: clip; }
+.is-ozon-preview .ue1c-calculator-results { position: sticky; top: 64px; z-index: 5; align-self: start; justify-content: flex-start; }
+.is-ozon-preview .ue1c-calculator-results .ozon-scenario-note { margin: 0; font-size: 10px; }
+.is-ozon-preview .ozon-margin-value { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 6px; white-space: normal; }
+.is-ozon-preview .ozon-margin-value > span { display: flex; align-items: center; gap: 5px; width: 100%; color: inherit; font: inherit; white-space: nowrap; }
+.ozon-margin-value small { display: flex; align-items: center; gap: 4px; max-width: 100%; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.is-ozon-preview .ozon-roi-field { display: flex; align-items: center; gap: 5px; }
+.is-ozon-preview .ozon-target-input { width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--ue-line); border-radius: 6px; background: var(--ue-surface); color: inherit; font: inherit; }
+.is-ozon-preview .ozon-margin-value small .ozon-target-input { width: 70px; }
+.ozon-roi-field b, .ozon-margin-value > span b { font-size: 12px; }
+.is-ozon-preview .ozon-category-row { --expanded-order: 8; }
+.is-ozon-preview .ozon-category-note { order: 8; display: none; gap: 4px; padding: 6px 12px 10px; font-size: 10px; color: var(--ue-muted); line-height: 1.4; }
+.is-ozon-preview .ue1c-calculator-inputs.is-expanded .ozon-category-note:not([hidden]) { display: grid; }
+.is-ozon-preview .ozon-advertising-breakdown { grid-template-columns: minmax(0, 1fr); }
+.ozon-advertising-breakdown > summary,
+.ozon-advertising-breakdown > ul { grid-column: 1 / -1; font-size: 10px; line-height: 1.5; }
+.ozon-advertising-breakdown > summary { cursor: pointer; font-weight: 690; }
+.ozon-advertising-breakdown > ul { margin: 0; padding-left: 16px; }
+
+@media (max-width: 760px) {
+    .is-ozon-preview .ozon-margin-value > span .ozon-target-input { padding: 5px 3px; font-size: 11px; }
+    .is-ozon-preview .ue1c-calculator-results {
+        grid-row: 1;
+        border-top: 0;
+        border-bottom: 1px solid var(--ue-line);
+        background: var(--ue-surface);
+    }
+}
+
+@media (max-width: 430px) {
+    .is-ozon-preview .ue1c-calculator-results { top: 104px; }
+}
+
+.ozon-price-save-dialog {
+    position: fixed;
+    inset: 0;
+    width: min(500px, calc(100vw - 24px));
+    max-height: calc(100dvh - 32px);
+    margin: auto;
+    padding: 0;
+    transform: none;
+}
+.ozon-price-save-dialog:not([open]) { display: none; }
+.ozon-price-save-dialog::backdrop { background: rgba(21, 32, 50, .34); }
+.ozon-price-save-dialog .ue1c-modal-head,
+.ozon-price-save-dialog .ue1c-modal-foot { flex: 0 0 auto; }
+.ozon-price-save-dialog .ue1c-modal-head > div { min-width: 0; }
+.ozon-price-save-dialog .ue1c-modal-head p { overflow-wrap: anywhere; }
+.ozon-price-save-dialog .ue1c-price-confirm-grid span { display: flex; align-items: center; }
+.ozon-price-save-dialog .ue1c-price-confirm-grid span:nth-child(3n + 2),
+.ozon-price-save-dialog .ue1c-price-confirm-grid span:nth-child(3n) { justify-content: flex-end; white-space: nowrap; }
+.ozon-price-save-dialog .ozon-price-save-note,
+.ozon-price-save-dialog .ozon-price-save-expiry {
+    margin: 10px 0 0;
+    color: var(--ue-muted);
+    font-size: 10px;
+    line-height: 1.5;
+}
+.ozon-price-save-dialog .ozon-price-save-expiry { font-size: 9px; }
+.ozon-price-save-status { margin: 0 0 12px; font-size: 12px; font-weight: 700; line-height: 1.5; }
+.ozon-price-save-dialog[data-state="succeeded"] .ozon-price-save-status { color: var(--ue-positive, #18743b); }
+.ozon-price-save-conditions { margin-top: 10px; color: var(--ue-muted); font-size: 10px; line-height: 1.5; }
+.ozon-price-save-conditions summary { width: fit-content; cursor: pointer; font-weight: 600; }
+.ozon-price-save-conditions p { margin: 8px 0; }
+.ozon-price-save-conditions ul { margin: 8px 0 0; padding-left: 16px; }
+.ozon-price-save-limits { display: grid; grid-template-columns: 1fr auto; gap: 5px 16px; margin: 10px 0; }
+.ozon-price-save-limits dd { margin: 0; color: var(--ue-text); font-weight: 600; }
+@media (max-width: 380px) {
+    .ozon-price-save-dialog .ue1c-price-confirm-grid span { padding: 9px 7px; }
+    .ozon-price-save-dialog .ue1c-modal-foot { gap: 8px; padding: 12px; }
+    .ozon-price-save-dialog .ue1c-primary-button { padding: 0 12px; font-size: 11px; }
+}
+.ozon-price-save-history { margin: 16px 0; }
+.ozon-price-save-history > summary {
+    width: fit-content;
+    padding: 4px 0;
+    color: var(--ue-text);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.ozon-price-save-history > summary:focus-visible { outline: 2px solid #5465cf; outline-offset: 3px; border-radius: 3px; }
+.ozon-price-save-history-content { padding-top: 10px; }
+.ozon-price-save-history-info { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.ozon-price-save-history-info strong { color: var(--ue-text); font-size: 11px; font-weight: 650; }
+.ozon-price-save-history-meta,
+.ozon-price-save-history-info .ozon-price-save-history-unsent { color: var(--ue-muted); font-size: 10px; }
+.ozon-price-save-history .ozon-entry-history-row { gap: 8px 16px; padding: 12px 0; }

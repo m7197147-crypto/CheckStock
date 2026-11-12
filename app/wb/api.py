@@ -1,5 +1,4 @@
 import json
-import logging
 import socket
 import threading
 import time
@@ -10,9 +9,10 @@ from hashlib import sha256
 
 from app.config import settings
 from app.core.barcodes import ordered_barcodes
+from app.core.logging_config import tagged_logger
 from app.wb import storefront_session
 
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "wb", "api")
 
 FBS_BASE = "https://marketplace-api.wildberries.ru"
 SUPPLIES_BASE = "https://supplies-api.wildberries.ru"
@@ -41,6 +41,8 @@ REQUEST_ATTEMPTS = settings.wb_request_attempts
 RETRY_BACKOFF_SECONDS = settings.wb_retry_backoff_seconds
 
 _WB_RATE_LIMIT_RULES: tuple[tuple[str, str, float], ...] = (
+    ("finance_detailed", "finance-api.wildberries.ru/api/finance/v1/sales-reports/detailed", 61.0),
+    ("common_tariffs", "common-api.wildberries.ru/api/v1/tariffs/", 1.1),
     ("advert_stats", "advert-api.wildberries.ru/adv/v3/fullstats", 20.1),
     ("advertising", "advert-api.wildberries.ru/", 0.21),
     ("analytics", "seller-analytics-api.wildberries.ru/", 20.1),
@@ -927,6 +929,10 @@ def get_storefront_products(
     caller can use an order-price fallback only for affected products. The
     regular scheduler relies on the configured safe batch size; a manual probe
     may explicitly request a larger batch.
+
+    TODO: Для дневной юнит-экономики читать свежие наблюдения из wb_hourly_prices,
+    когда таблица будет содержать все нужные поля карточки. Почасовой сборщик
+    и диагностика пока используют прямой запрос.
     """
 
     unique: list[str] = []
@@ -974,7 +980,6 @@ def get_storefront_products(
                     "curr": "rub",
                     "dest": settings.wb_storefront_dest,
                     "lang": "ru",
-                    "spp": 30,
                     "nm": ";".join(chunk),
                 },
             )

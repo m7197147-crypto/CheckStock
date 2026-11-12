@@ -3,34 +3,22 @@
 This module only reads saved sources. Opening the analyzer never starts API jobs.
 """
 
-import re
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
 from app import db
-from app.access.access_control import restricts_unit_economics_to_manager
-from app.access.sections import has_access
+from app.access.authentication import is_active_user
 from app.core.domain import MOSCOW_TIMEZONE
 from app.core.stores import STORES
-from app.dto.identity import SectionAccessLevel, SectionName, coerce_user
 from app.dto.unit_economics_1c import UnitEconomics1CProductSettings
 from app.economics.completeness import aggregate_days
-from app.economics.wb import calculations, history
+from app.economics.wb import calculations, catalogue, history
 from app.repositories import analyzer as repository
 from app.repositories.economics_coverage import wb_days
 
 
 def permitted(manager, user) -> bool:
-    user = coerce_user(user)
-    if user is None:
-        return False
-    if not restricts_unit_economics_to_manager(user):
-        return True
-
-    def identity(value):
-        return " ".join(re.sub(r"[^0-9a-zа-я]+", " ", str(value or "").casefold().replace("ё", "е")).split())
-
-    return identity(manager) == identity(user.full_name)
+    return is_active_user(user)
 
 
 def index(rows, article="article"):
@@ -113,9 +101,18 @@ def turnover_sort_key(row, value):
 
 
 def load(
-    stores: tuple[str, ...], week: date, user, *, today: date | None = None, include_notes=True, sources=None
+    stores: tuple[str, ...],
+    week: date,
+    user,
+    *,
+    today: date | None = None,
+    include_notes=True,
+    include_current_roi=True,
+    sources=None,
+    now: datetime | None = None,
 ) -> dict:
-    today = today or datetime.now(MOSCOW_TIMEZONE).date()
+    now = (now or datetime.now(MOSCOW_TIMEZONE)).astimezone(MOSCOW_TIMEZONE)
+    today = today or now.date()
     week = week - timedelta(days=week.weekday())
     days = [(week + timedelta(days=i)).isoformat() for i in range(7)]
     anchor = min(today, week + timedelta(days=6))
@@ -130,14 +127,24 @@ def load(
     orders, advertising, rnp = sources.orders, sources.advertising, sources.rnp
     snapshots, coverage = sources.snapshots, sources.coverage
     cabinets, settings, current_metrics = sources.cabinets, sources.settings, sources.current_metrics
+    current_economics = {}
+    if include_current_roi:
+        yesterday = today - timedelta(days=1)
+        current_products, _ = catalogue.load_wb_calculator_products(
+            stores, today, 7, yesterday - timedelta(days=6), yesterday, include_inactive=True
+        )
+        current_economics = {
+            (item["store_slug"], item["article"]): item["current_economics"] for item in current_products
+        }
     work = defaultdict(lambda: defaultdict(list))
-    can_edit = has_access(user, SectionName.ANALYZER, SectionAccessLevel.WRITE)
+    can_edit = is_active_user(user)
     for row in repository.notes(stores, days[0], today.isoformat()) if include_notes else ():
         row["can_edit"] = can_edit and row["action_date"] == today.isoformat()
         work[(row["store_slug"], row["article"])][row["action_date"]].append(row)
 
     rows = []
     for store in stores:
+        coefficient = cabinets[store].coefficient_at_hour(now.hour)
         for product in sources.products[store]:
             article = str(product["article"])
             key = (store, article)
@@ -249,7 +256,7 @@ def load(
             goal, day_goal = reference.get("goal_week"), reference.get("goal_day")
             if day_goal is None and goal is not None:
                 day_goal = goal / 7
-            stock_values = [product.get(field) for field in ("fbo_stock", "fbs_stock", "ff_available")]
+            stock_values = [product.get(field) for field in ("fbo_stock", "fbs_stock")]
             stock = total(stock_values)
             stock_orders = [
                 product_orders[day].get("orders_count")
@@ -273,8 +280,9 @@ def load(
                 if day_goal is not None and previous_price is not None
                 else None
             )
-            forecast = fact  # D is fixed to 1 until its calculation is specified.
-            difference = round(plan - forecast, 2) if plan is not None and forecast is not None else None
+            forecast = round(fact * coefficient, 2) if fact is not None else None
+            difference = round(forecast - plan, 2) if plan is not None and forecast is not None else None
+            current = current_economics.get(key, {})
             row = {
                 "id": f"{store}:{article}",
                 "store_slug": store,
@@ -296,6 +304,7 @@ def load(
                 "stockStatus": reference.get("stock_status"),
                 "stockEnds": reference.get("stock_end_week"),
                 "roi": economics.get("roi"),
+                "currentRoi": current.get("roi"),
                 "drr": ratio(spend, bought_amount) if bought_amount else 0.0 if spend == 0 else None,
                 "previousPrice": previous_price,
                 "impressions": [ad_value(day, "impressions") for day in traffic_days],
@@ -316,7 +325,7 @@ def load(
                 "spp": ratio(retail - customer, retail) if retail and customer is not None else None,
                 "wallet": price.get("customer_price_with_wallet"),
                 "price": retail,
-                "coeff": 1,
+                "coeff": coefficient,
                 "fact": fact,
                 "forecast": forecast,
                 "difference": difference,
@@ -341,9 +350,12 @@ def load(
                     "expected": len(period),
                     "drr": drr_days,
                     "roiComplete": economics.get("complete", False),
+                    "currentRoiComplete": current.get("complete", False),
                     "roiMessages": economics.get("messages", []),
                 },
                 "weights": {
+                    "currentProfit": current.get("margin"),
+                    "currentPurchase": current.get("purchase_value"),
                     "spend": spend,
                     "boughtAmount": bought_amount,
                     "yesterdaySpend": yesterday_spend,
@@ -372,5 +384,9 @@ def load(
         "stockPreviousFrom": stock_days[0],
         "stockPreviousTo": stock_days[-1],
         "turnover_day": today.isoformat(),
+        "coefficient_hour": now.hour,
+        "coefficient_valid_until": (
+            now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        ).isoformat(),
         "loaded_at": datetime.now(UTC).isoformat(),
     }

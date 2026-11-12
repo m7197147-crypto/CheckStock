@@ -43,12 +43,6 @@
                     >Поставки FBO</a
                 >
                 <a
-                    class="nav-subitem $stock_randomizer_active"
-                    href="/stock/randomizer"
-                    $stock_randomizer_hidden
-                    >Рандомайзер</a
-                >
-                <a
                     class="nav-subitem $stock_cost_report_active"
                     href="/stock/cost-report"
                     $stock_cost_report_hidden
@@ -84,6 +78,12 @@
             <div class="nav-submenu" id="nav-analytics-submenu" data-nav-submenu>
                 <a class="nav-subitem $analyzer_active" href="/analytics/analyzer"$analyzer_hidden>Анализатор</a>
                 <a class="nav-subitem $ephemerides_active" href="/analytics/ephemerides"$ephemerides_hidden>Эфемериды</a>
+                <a class="nav-subitem" href="/analytics/ozon/analyzer">Анализатор · Ozon</a>
+                <a class="nav-subitem" href="/analytics/ozon/ephemerides">Эфемериды · Ozon</a>
+                <a class="nav-subitem" href="/analytics/ozon/sales-api">Продажи по API · Ozon</a>
+                <a class="nav-subitem $yandex_analyzer_active" href="/analytics/yandex-market/analyzer">Анализатор · ЯМ</a>
+                <a class="nav-subitem $yandex_ephemerides_active" href="/analytics/yandex-market/ephemerides">Эфемериды · ЯМ</a>
+                <a class="nav-subitem $yandex_sales_api_active" href="/analytics/yandex-market/sales-api">Продажи по API · ЯМ</a>
                 <a class="nav-subitem $sales_api_active" href="/analytics/sales-api"$sales_api_hidden>Продажи по API</a>
             </div>
         </div>
@@ -165,8 +165,15 @@
                     $unit_1c_target_price_hidden
                     >WB · Целевая цена</a
                 >
+                <a class="nav-subitem marketplace-report-wb $wb_conditions_active" href="/sales/unit-economics-1c/reports/standard-costs" $wb_conditions_hidden>WB · Расходы без ИУ</a>
+                <a class="nav-subitem marketplace-report-wb $unit_1c_spp_report_active"
+                   href="/sales/unit-economics-1c/reports/spp" $unit_1c_spp_report_hidden>WB · Отчёт по СПП</a>
+                <a class="nav-subitem marketplace-report-wb $unit_1c_rating_report_active"
+                   href="/sales/unit-economics-1c/reports/rating" $unit_1c_rating_report_hidden>WB · Рейтинг товаров</a>
                 <a class="nav-subitem marketplace-report-ym $unit_1c_reports_yandex_active" href="/sales/unit-economics-1c/yandex-market/reports/unit-profit" $unit_1c_reports_yandex_hidden>ЯМ · Юниточная прибыль</a>
                 <a class="nav-subitem marketplace-report-ym $unit_1c_target_price_yandex_active" href="/sales/unit-economics-1c/yandex-market/reports/target-price" $unit_1c_target_price_yandex_hidden>ЯМ · Целевая цена</a>
+                <a class="nav-subitem marketplace-report-ozon" href="/sales/unit-economics-1c/ozon/reports/unit-profit">Ozon · Юниточная прибыль</a>
+                <a class="nav-subitem marketplace-report-ozon" href="/sales/unit-economics-1c/ozon/reports/target-price">Ozon · Целевая цена</a>
             </div>
         </div>
 
@@ -181,7 +188,7 @@
                 </button>
             </div>
             <div class="nav-submenu" id="nav-finance-reports-submenu" data-nav-submenu>
-                <a class="nav-subitem $finance_active" href="/finance-reports/yandex">Яндекс</a>
+                <a class="nav-subitem $finance_active" href="https://153.76.164.196" target="_blank" rel="noopener noreferrer" title="Открыть финансовые отчёты Яндекса в новой вкладке">Яндекс</a>
             </div>
         </div>
 
@@ -201,8 +208,10 @@
             <div class="nav-submenu" id="nav-agents-submenu" data-nav-submenu>
                 <a class="nav-subitem" href="/ai-agents/keys">API-ключи</a>
                 <a class="nav-subitem" href="/ai-agents/catalog">Каталог API</a>
+                <a class="nav-subitem" href="/ai-agents/instructions">Инструкция ИИ</a>
                 <a class="nav-subitem" href="/ai-agents/gpt">ChatGPT</a>
                 <a class="nav-subitem" href="/ai-agents/claude">Claude / MCP</a>
+                <a class="nav-subitem" href="/ai-agents/gpt-mcp">ChatGPT / MCP</a>
             </div>
         </div>
     </nav>
@@ -219,7 +228,7 @@
                 <span class="avatar">$user_initials</span>
                 <span class="profile-copy">
                     <strong>$user_name</strong>
-                    <small>$user_role</small>
+                    <small></small>
                     <span class="profile-connection"
                         ><span class="live-dot" aria-hidden="true"></span><span>Подключено</span></span
                     >

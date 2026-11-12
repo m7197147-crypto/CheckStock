@@ -2,6 +2,22 @@
 
 Запускайте из корня проекта: `python -m scripts.<папка>.<имя>`.
 
+Автоматическое расписание запускается отдельно от веб-сервера командой `python -m app.jobs.worker`; проверка здоровья — `python -m app.jobs.worker --healthcheck`. Это точка входа приложения, а не скрипт разовой выгрузки. В Docker используется сервис `scheduler`. [Запуск и восстановление](../docs/background-jobs.md).
+
+Резервная копия текущей БД в Google Диск: `python -m scripts.ops.backup_to_drive`.
+Проверка доступа без загрузки: та же команда с `--check`. Расписание — 08:00 МСК,
+управление во вкладке Google; [настройки и проверка восстановления](../docs/database-backups.md).
+
+Подготовка постоянного хранилища API/MCP: `python -m scripts.ops.prepare_agent_storage`.
+Без `--apply` показывает план; существующие целевые файлы не перезаписывает.
+В Docker запускается одноразово от root, основной процесс остаётся `checkstock`.
+[Остановка писателей, перенос и права](../docs/agent-api-deployment.md#переход-с-файлов-в-secrets).
+
+Удаление прежней матрицы доступа SQLite: `python -m scripts.ops.retire_account_acl
+--database data/checkstock.db`. Без `--apply` команда только читает схему; с `--apply`
+создаёт и проверяет backup, мигрирует и проверяет сохранность данных. Перед применением
+остановите приложение и фоновые процессы. [Контракт и порядок отката](../docs/authentication.md).
+
 | Папка | Команды |
 |---|---|
 | `ops` | Ключи API, создание пользователей и Docker watchdog. |
@@ -11,11 +27,12 @@
 | `diagnostics` | Проверка подключений, складов, каталогов и исходных таблиц. |
 | `parsers` | Браузерный сборщик цен ЯМ и подготовка отдельного анонимного сеанса WB. |
 
-Офлайн-сверка финансового месяца ЯМ: `python -m scripts.diagnostics.reconcile_yandex_finance tests/fixtures/yandex_finance/month.json --output work/finance-reconciliation.json`. Использует SQLite в памяти, не вызывает API и не пишет в рабочую БД. Формат bundle и ограничения описаны в [инструкции финансового отчёта](../docs/yandex-finance.md).
+Офлайн-сверка финансового месяца ЯМ: подготовьте собственный JSON bundle, например `work/finance-month.json`, и запустите `python -m scripts.diagnostics.reconcile_yandex_finance work/finance-month.json --output work/finance-reconciliation.json`. Использует SQLite в памяти, не вызывает API и не пишет в рабочую БД. Формат bundle и ограничения описаны в [инструкции финансового отчёта](../docs/yandex-finance.md).
 
 ```shell
 python -m scripts.sync.sync_unit_economics_1c_source_data
 python -m scripts.sync.sync_unit_economics_yandex --store rimili --source orders
+python -m scripts.sync.backfill_yandex_orders --date-from 2026-08-02 --date-to 2026-11-01
 python -m scripts.diagnostics.check_inbound_access
 python -m scripts.ops.agent_key --help
 python -m scripts.imports.migrate_sqlite_to_postgres --help

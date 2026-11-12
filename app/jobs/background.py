@@ -1,8 +1,8 @@
 import asyncio
-import logging
 from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from time import sleep
 
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
@@ -10,25 +10,37 @@ from fastapi.concurrency import run_in_threadpool
 from app import db
 from app.access import auth
 from app.config import settings
+from app.container import ApplicationContainer
+from app.core.constants import EPHEMERIDES_STOCK_SCHEDULE, JOBS
 from app.core.domain import MOSCOW_TIMEZONE
+from app.core.logging_config import tagged_logger
 from app.dto.system import SyncFailure, SyncGroupReport, TokenRefreshResult
-from app.economics import ozon_advertising, ozon_turnover
+from app.dto.wb_hourly_prices import WbHourlyCollection
 from app.economics.sources import ozon as ozon_source_sync
 from app.economics.sources import purchase_prices as unit_source_sync
 from app.economics.wb import advertising as advertising_sync
 from app.economics.wb import calculations as unit_economics_1c
 from app.economics.wb import history as unit_margin_history
 from app.economics.wb import reference_data as unit_reference_sync
+from app.economics.wb import standard_sync
 from app.exports import ftp as ftp_export
 from app.exports import ftp_schedule as ftp_export_schedule
 from app.exports import project_sheet as stock_sheet_export
-from app.integrations import google_sheet_catalog, google_week_update
+from app.infrastructure.async_resources import AsyncResources
+from app.jobs import (
+    database_backup,
+    google_weeks,
+    inbound_schedule,
+    ozon,
+    wb_ephemerides,
+    wb_transit,
+    yandex_analytics,
+)
 from app.jobs import finance as finance_sync
+from app.jobs import locks as sync_locks
 from app.jobs import settings as sync_settings
-from app.jobs import wb_transit
-from app.jobs.scheduling import BackgroundJob, run_background_job
+from app.jobs.scheduling import BackgroundJob, ScheduledJob
 from app.ozon import catalog as ozon_catalog
-from app.ozon import reputation as ozon_reputation
 from app.ozon import sync as ozon_sync
 from app.stock import history as stock_history
 from app.stock import inbound_supplies, supply_arrivals
@@ -36,6 +48,7 @@ from app.wb import catalog as wb_catalog
 from app.wb import funnel_orders as wb_funnel_orders
 from app.wb import sync as wb_sync
 from app.wb import token_watch
+from app.wb.hourly_prices import WbHourlyPriceService
 from app.yandex import catalog as ya_catalog
 from app.yandex import categories as ya_categories
 from app.yandex import category_commissions as ya_category_commissions
@@ -44,7 +57,7 @@ from app.yandex import product_novelty as ya_product_novelty
 from app.yandex import sync as ya_sync
 from app.yandex import unit_economics_sync as ya_unit_sync
 
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "jobs", "background")
 
 SyncTarget = tuple[str, Callable[[], object]]
 
@@ -287,6 +300,44 @@ def _unit_economics_1c_price_jobs() -> tuple[BackgroundJob, ...]:
     )
 
 
+def _wb_hourly_job_report(result: WbHourlyCollection) -> dict[str, dict]:
+    """The existing job tracker reads nested dictionaries to identify failures."""
+    reports: dict[str, dict] = {}
+    for report in result.reports:
+        value: dict = {"ok": report.ok, "rows": report.rows}
+        if report.catalog_products is not None:
+            value["catalog_products"] = report.catalog_products
+        if report.missing_prices is not None:
+            value["missing_prices"] = report.missing_prices
+            value["failed_nm_ids"] = list(report.failed_nm_ids)
+            value["errors"] = list(report.errors)
+        if report.error is not None:
+            value["error"] = report.error
+        reports[report.store_slug] = value
+    return reports
+
+
+def _wb_hourly_price_job(service: WbHourlyPriceService) -> BackgroundJob:
+    return BackgroundJob(
+        "wb_hourly_prices_sync",
+        lambda: _wb_hourly_job_report(service.collect(sync_settings.enabled_stores("wb_hourly_prices_sync"))),
+        _fixed_delay(settings.wb_hourly_prices_interval_seconds),
+        startup_delay_seconds=60,
+        is_enabled=lambda: _job_enabled("wb_hourly_prices_sync"),
+    )
+
+
+def _wb_daily_price_close_job() -> BackgroundJob:
+    name = "wb_daily_prices_close_00_msk"
+    return BackgroundJob(
+        name,
+        ApplicationContainer().wb_daily_price_closer.close,
+        _moscow_daily_delay(0, 5),
+        startup_delay_seconds=_seconds_until_next_moscow_run(0, 5),
+        is_enabled=lambda: _job_enabled(name),
+    )
+
+
 def _wb_stock_history_jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
     return (
         BackgroundJob(
@@ -322,6 +373,9 @@ def _ftp_export_jobs() -> tuple[BackgroundJob, ...]:
                 is_enabled=lambda current_job=job_name: (
                     _job_enabled(current_job) and ftp_export_schedule.should_attempt(current_job)
                 ),
+                next_delay_after_success=lambda current_job=job_name: ftp_export_schedule.next_delay_seconds(
+                    current_job, succeeded=True
+                ),
             )
         )
     return tuple(jobs)
@@ -349,8 +403,19 @@ def _yandex_unit_economics_jobs() -> tuple[BackgroundJob, ...]:
     )
 
 
-def _jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
+def _jobs(catalog_ready: asyncio.Event) -> tuple[ScheduledJob, ...]:
     return (
+        BackgroundJob(
+            standard_sync.JOB,
+            standard_sync.sync_job_payload,
+            _fixed_delay(settings.wb_standard_costs.interval_seconds),
+            startup_delay_seconds=settings.wb_standard_costs.startup_delay_seconds,
+            is_enabled=lambda: _job_enabled(standard_sync.JOB),
+            retry_delays=(
+                settings.wb_standard_costs.retry_first_seconds,
+                settings.wb_standard_costs.retry_second_seconds,
+            ),
+        ),
         BackgroundJob(
             wb_transit.JOB,
             wb_transit.sync_all,
@@ -367,18 +432,45 @@ def _jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
             is_enabled=lambda: settings.background_sync_enabled and _job_enabled(finance_sync.JOB),
         ),
         BackgroundJob(
-            google_sheet_catalog.JOB_NAME,
-            google_sheet_catalog.refresh_if_due,
-            _fixed_delay(60),
-            startup_delay_seconds=15,
-            is_enabled=google_sheet_catalog.is_due,
+            wb_ephemerides.JOB,
+            wb_ephemerides.snapshot,
+            wb_ephemerides.delay,
+            startup_delay_seconds=wb_ephemerides.delay(startup=True),
+            ready_event=catalog_ready,
+            retry_delays=EPHEMERIDES_STOCK_SCHEDULE.retry_delays,
+            is_enabled=lambda: settings.background_sync_enabled and _job_enabled(wb_ephemerides.JOB),
+        ),
+        *google_weeks.jobs(),
+        BackgroundJob(
+            JOBS.yandex_analytics_funnel.name,
+            lambda: yandex_analytics.sync("funnel"),
+            _fixed_delay(settings.yandex_analytics_funnel_interval_seconds),
+            startup_delay_seconds=settings.yandex_analytics_startup_delay_seconds,
+            ready_event=catalog_ready,
+            is_enabled=lambda: (
+                settings.background_sync_enabled and _job_enabled(JOBS.yandex_analytics_funnel.name)
+            ),
         ),
         BackgroundJob(
-            google_week_update.JOB_NAME,
-            google_week_update.run_due,
-            _fixed_delay(60),
-            startup_delay_seconds=10,
-            is_enabled=google_week_update.is_due,
+            JOBS.yandex_customer_transit.name,
+            lambda: yandex_analytics.sync("transit"),
+            _fixed_delay(settings.yandex_analytics_transit_interval_seconds),
+            startup_delay_seconds=settings.yandex_analytics_startup_delay_seconds,
+            ready_event=catalog_ready,
+            is_enabled=lambda: (
+                settings.background_sync_enabled and _job_enabled(JOBS.yandex_customer_transit.name)
+            ),
+        ),
+        BackgroundJob(
+            JOBS.yandex_ephemerides_stock.name,
+            yandex_analytics.snapshot,
+            yandex_analytics.delay,
+            startup_delay_seconds=yandex_analytics.delay(startup=True),
+            ready_event=catalog_ready,
+            retry_delays=EPHEMERIDES_STOCK_SCHEDULE.retry_delays,
+            is_enabled=lambda: (
+                settings.background_sync_enabled and _job_enabled(JOBS.yandex_ephemerides_stock.name)
+            ),
         ),
         BackgroundJob(
             "catalog_sync",
@@ -407,8 +499,9 @@ def _jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
         BackgroundJob(
             inbound_supplies.JOB_NAME,
             inbound_supplies.sync_all,
-            _fixed_delay(settings.inbound_sync_interval_seconds),
-            startup_delay_seconds=90,
+            inbound_schedule.delay,
+            startup_delay_seconds=inbound_schedule.delay(),
+            align_scheduled_run=inbound_schedule.align,
             is_enabled=lambda: _job_enabled(inbound_supplies.JOB_NAME),
         ),
         BackgroundJob(
@@ -428,36 +521,7 @@ def _jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
         ),
         *_funnel_jobs(),
         *_yandex_unit_economics_jobs(),
-        BackgroundJob(
-            "ozon_reputation_sync",
-            ozon_reputation.sync_all,
-            _fixed_delay(24 * 60 * 60),
-            startup_delay_seconds=150,
-            is_enabled=lambda: _job_enabled("ozon_reputation_sync"),
-            run_callback=lambda: ozon_reputation.sync_all(
-                sync_settings.enabled_stores("ozon_reputation_sync", "OZON")
-            ),
-        ),
-        BackgroundJob(
-            ozon_turnover.JOB_NAME,
-            ozon_turnover.sync_all,
-            _moscow_daily_delay(3),
-            ready_event=catalog_ready,
-            is_enabled=lambda: _job_enabled(ozon_turnover.JOB_NAME),
-            run_callback=lambda: ozon_turnover.sync_all(
-                sync_settings.enabled_stores(ozon_turnover.JOB_NAME, "OZON")
-            ),
-        ),
-        BackgroundJob(
-            ozon_advertising.JOB_NAME,
-            ozon_advertising.sync_all,
-            _moscow_daily_delay(4),
-            ready_event=catalog_ready,
-            is_enabled=lambda: _job_enabled(ozon_advertising.JOB_NAME),
-            run_callback=lambda: ozon_advertising.sync_all(
-                sync_settings.enabled_stores(ozon_advertising.JOB_NAME, "OZON")
-            ),
-        ),
+        *ozon.jobs(catalog_ready),
         BackgroundJob(
             ya_category_commissions.JOB,
             ya_category_commissions.sync_all,
@@ -543,34 +607,49 @@ def _jobs(catalog_ready: asyncio.Event) -> tuple[BackgroundJob, ...]:
 
 
 def _initialize_application() -> None:
-    db.init_db()
-    db.seed_defaults()
-    stock_sheet_export.ensure_defaults()
-    auth.seed_superadmin()
+    while True:
+        try:
+            handle = sync_locks.acquire("application_initialization")
+            break
+        except sync_locks.SyncJobBusyError:
+            sleep(1)
+    try:
+        db.init_db()
+        db.seed_defaults()
+        stock_sheet_export.ensure_defaults()
+        auth.seed_initial_user()
+    finally:
+        handle.close()
+
+
+def scheduled_jobs(catalog_ready: asyncio.Event) -> tuple[ScheduledJob, ...]:
+    jobs = _jobs(catalog_ready) if settings.background_sync_enabled else ()
+    jobs += (database_backup.job(),)
+    if not settings.background_sync_enabled and settings.funnel_orders_sync_enabled:
+        jobs += _funnel_jobs()
+    if settings.unit_economics_1c_price_sync_enabled:
+        jobs += _unit_economics_1c_price_jobs()
+    if settings.wb_hourly_prices_enabled:
+        jobs += (_wb_hourly_price_job(ApplicationContainer().wb_hourly_prices),)
+        jobs += (_wb_daily_price_close_job(),)
+    return jobs
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     await run_in_threadpool(_initialize_application)
-    catalog_ready = asyncio.Event()
-    jobs = _jobs(catalog_ready) if settings.background_sync_enabled else ()
-    if not settings.background_sync_enabled and settings.funnel_orders_sync_enabled:
-        jobs += _funnel_jobs()
-    if settings.unit_economics_1c_price_sync_enabled:
-        jobs += _unit_economics_1c_price_jobs()
-    tasks = [asyncio.create_task(run_background_job(job), name=f"checkstock:{job.name}") for job in jobs]
-    application.state.background_jobs = jobs
-    application.state.background_tasks = tasks
+    application.state.background_jobs = ()
+    application.state.background_tasks = ()
     logger.info(
-        "application_started background_jobs=%s database=%s",
-        len(tasks),
+        "application_started scheduler=external database=%s",
         "postgresql" if settings.database_url else settings.database_path,
     )
     try:
-        yield
+        async with AsyncResources() as resources:
+            application.state.async_resources = resources
+            from app.stock.fbo_sync import reconcile_saved
+
+            await reconcile_saved(resources.database)
+            yield
     finally:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info("application_stopped background_jobs=%s", len(tasks))
+        logger.info("application_stopped")

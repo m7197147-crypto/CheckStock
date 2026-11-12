@@ -1,10 +1,13 @@
 """Explicit, scoped read models for employee analytics. No arbitrary database access."""
 
 import math
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
+from pydantic import JsonValue
+
 from app import db
-from app.access.access_control import restricts_unit_economics_to_manager
+from app.dto.agent_query import ReportQuery
 from app.repositories.core import get_connection
 
 TAG_LABELS = {
@@ -18,7 +21,7 @@ TAG_LABELS = {
 }
 
 
-def filter_tags(rows, query):
+def filter_tags(rows: list[dict[str, JsonValue]], query: ReportQuery) -> list[dict[str, JsonValue]]:
     if query.tag_column is None and query.tag_value is None and query.tag_operator == "eq":
         return rows
     if query.tag_column is None or query.tag_value is None:
@@ -66,7 +69,7 @@ def clean(value):
     return value
 
 
-def catalog(store, marketplace):
+def catalog(store: str | None, marketplace: str) -> list[dict[str, JsonValue]]:
     return read(
         "SELECT article, barcode, name, mp_sku, mp_product_id, image_url, mp_updated_at "
         "FROM stock_items WHERE store_slug=? AND marketplace=? AND is_service=0 ORDER BY article",
@@ -75,18 +78,15 @@ def catalog(store, marketplace):
 
 
 def references(user, store, manager=None):
-    from app.web.routers.unit_economics import _manager_matches_user
 
     rows = db.get_unit_economics_1c_product_reference_rows((store,))
-    if restricts_unit_economics_to_manager(user):
-        rows = [r for r in rows if _manager_matches_user(str(r.get("manager") or ""), user)]
     if manager:
         rows = [r for r in rows if str(r.get("manager") or "").casefold() == manager.casefold()]
     return rows
 
 
 def economic_filter(rows, user, store, manager=None, article_key="article"):
-    if not restricts_unit_economics_to_manager(user) and not manager:
+    if not manager:
         return rows
     allowed = {str(r["article"]) for r in references(user, store, manager)}
     all_articles = {str(r["article"]) for r in db.get_unit_economics_1c_product_reference_rows((store,))}
@@ -138,7 +138,7 @@ def prices(query):
     return [r for r in rows if r["article"] in available]
 
 
-def stocks(query):
+def stocks(query: ReportQuery) -> list[dict[str, JsonValue]]:
     rows = read(
         "SELECT article, scheme, NULL AS warehouse, quantity, updated_at FROM mp_stock "
         "WHERE store_slug=? AND marketplace=?",
@@ -181,14 +181,14 @@ def stocks(query):
     return rows + fulfillment + [r for r in transit if r["quantity"] > 0]
 
 
-def stock_summary(query):
-    from app.web.stock_rendering import schemes_for
+def stock_summary(query: ReportQuery) -> tuple[list[dict[str, JsonValue]], dict[str, str]]:
+    from app.stock.export_schemes import schemes_for
 
     schemes = schemes_for(query.marketplace, query.store)
     labels = {
         "total": "Тотал",
         "ff_available": "Доступно ФФ для распределения",
-        "transit": "В пути между ФФ",
+        "transit": "В пути",
         **{scheme + "_stock": label for scheme, label in schemes},
     }
     rows = db.get_stock_items(query.store, query.marketplace, tuple(s for s, _ in schemes))
@@ -211,7 +211,9 @@ def stock_summary(query):
     return rows, labels
 
 
-def operations(query, allowed_pairs):
+def operations(
+    query: ReportQuery, allowed_pairs: Iterable[tuple[str | None, str]]
+) -> list[dict[str, JsonValue]]:
     rows = db.get_operations_with_items_for_period(
         (query.store,),
         query.date_from.isoformat(),
@@ -234,7 +236,9 @@ def operations(query, allowed_pairs):
     return result
 
 
-def grouped(rows, group_by, metrics):
+def grouped(
+    rows: list[dict[str, JsonValue]], group_by: str, metrics: tuple[str, ...]
+) -> list[dict[str, JsonValue]]:
     buckets = {}
     for row in rows:
         key = row.get("day" if group_by == "day" else "article")
@@ -252,7 +256,7 @@ def grouped(rows, group_by, metrics):
     return list(buckets.values())
 
 
-def filtered(rows, query):
+def filtered(rows: list[dict[str, JsonValue]], query: ReportQuery) -> list[dict[str, JsonValue]]:
     result = rows
     if query.article:
         result = [r for r in result if str(r.get("article") or "") == query.article]
@@ -273,7 +277,13 @@ def filtered(rows, query):
     return result
 
 
-def page(rows, query, metrics=(), *, sort_fields=()):
+def page(
+    rows: list[dict[str, JsonValue]],
+    query: ReportQuery,
+    metrics: tuple[str, ...] = (),
+    *,
+    sort_fields: Iterable[str] = (),
+) -> dict[str, JsonValue]:
     rows = clean(rows)
     key = query.sort_by or (metrics[0] if metrics else next(iter(rows[0]), "article") if rows else "article")
     if query.sort_by and key not in set(metrics) | set(sort_fields) | {
@@ -325,7 +335,12 @@ def status(store, marketplace, section):
     return result
 
 
-def envelope(query, payload, warnings=(), sources=()):
+def envelope(
+    query: ReportQuery,
+    payload: dict[str, JsonValue],
+    warnings: Iterable[str] = (),
+    sources: Iterable[dict[str, JsonValue]] = (),
+) -> dict[str, JsonValue]:
     return clean(
         {
             "store": query.store,

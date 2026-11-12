@@ -4,7 +4,9 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
+from app.core.constants import OZON_STOCK_ANALYTICS
 from app.core.stores import STORES
+from app.exports.project_scope import stores_for_marketplace
 from app.exports.stock_sheet import StockSheetExportError
 from app.ozon import api as ozon_api
 from app.ozon import tokens as ozon_tokens
@@ -39,6 +41,15 @@ def _article(value) -> str:
     return str(value).strip()
 
 
+def _warehouse_id(value) -> int:
+    # Ozon uses negative IDs for pickup points. This is an identifier, not stock.
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("Ozon не вернул целый идентификатор склада")
+    if isinstance(value, str) and not value.removeprefix("-").isdecimal():
+        raise ValueError("Ozon вернул некорректный идентификатор склада")
+    return int(value)
+
+
 def _rows(value) -> list[dict]:
     if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
         raise ValueError("API вернул неполный список товаров FBO")
@@ -69,7 +80,7 @@ def _wb(store: str) -> TransitSnapshot:
 
 def _ozon(store: str) -> TransitSnapshot:
     client_id, api_key = ozon_tokens.get_credentials(store)
-    sku_articles = {}
+    sku_articles: dict[int, str] = {}
     for product in ozon_api.get_product_stocks(client_id, api_key):
         article = _article(product.get("offer_id"))
         for stock in _rows(product.get("stocks")):
@@ -86,12 +97,12 @@ def _ozon(store: str) -> TransitSnapshot:
         article = _article(row.get("offer_id"))
         if sku_articles.get(sku) != article:
             raise ValueError("Ozon вернул неизвестный SKU или другой артикул в аналитике FBO")
-        identity = (sku, _quantity(row.get("warehouse_id")))
+        if OZON_STOCK_ANALYTICS.fbs_return_tag in (row.get("item_tags") or []):
+            continue
+        identity = (sku, _warehouse_id(row.get("warehouse_id")))
         if identity in seen:
             raise ValueError("Ozon повторил товар на складе в аналитике FBO")
         seen.add(identity)
-        if "FBS_RETURN" in (row.get("item_tags") or []):
-            continue
         result.to_customer[article] += _quantity(row.get("outbound_pending_delivery"))
         result.from_customer[article] += _quantity(row.get("return_from_customer_stock_count"))
     return result
@@ -174,10 +185,11 @@ def _yandex(store: str) -> TransitSnapshot:
 
 def load(marketplace: str) -> dict[str, TransitSnapshot]:
     loader = {"WB": _wb, "OZON": _ozon, "YANDEX MARKET": _yandex}[marketplace]
+    stores = stores_for_marketplace(marketplace)
     snapshots = {}
     # Rate limits remain scoped to the token/client in each marketplace's API client.
-    with ThreadPoolExecutor(max_workers=len(STORES), thread_name_prefix="fbo-export") as executor:
-        futures = {executor.submit(loader, store): store for store in STORES}
+    with ThreadPoolExecutor(max_workers=len(stores), thread_name_prefix="fbo-export") as executor:
+        futures = {executor.submit(loader, store): store for store in stores}
         for future in as_completed(futures):
             store = futures[future]
             try:
@@ -186,4 +198,4 @@ def load(marketplace: str) -> dict[str, TransitSnapshot]:
                 raise StockSheetExportError(
                     f"{STORES[store].name} / {marketplace} / FBO в пути: {error}"
                 ) from error
-    return {store: snapshots[store] for store in STORES}
+    return {store: snapshots[store] for store in stores}

@@ -8,10 +8,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from app import db
-from app.access.access_control import accessible_stores, has_scope
-from app.access.sections import has_access as has_section_access
+from app.access.authentication import is_active_user
+from app.access.resources import accessible_stores, has_store_marketplace
 from app.core.stores import STORES
-from app.dto.identity import Role, SectionAccessLevel, SectionName, coerce_user
+from app.dto.identity import coerce_user
 from app.dto.unit_economics_1c import (
     UnitEconomics1CProductTargetRequest,
     UnitEconomics1CTargetPriceExportRequest,
@@ -22,7 +22,7 @@ from app.economics.wb import target_price_export as target_export
 from app.economics.wb import target_prices as pricing
 from app.exports import stock_sheet_inbound
 from app.web.downloads import _download_headers
-from app.web.routers.unit_economics import _manager_matches_user, _report_historical_economics
+from app.web.routers.unit_economics import _report_historical_economics
 from app.web.templating import fill_template, render_page
 
 router = APIRouter()
@@ -36,11 +36,7 @@ async def target_price_page(request: Request):
         target_price_config=json.dumps(
             {
                 "stores": [{"slug": slug, "name": STORES[slug]["name"]} for slug in stores],
-                "canEdit": has_section_access(
-                    request.state.user,
-                    SectionName.REPORT_TARGET_PRICE,
-                    SectionAccessLevel.WRITE,
-                ),
+                "canEdit": is_active_user(request.state.user),
             },
             ensure_ascii=False,
         ).replace("</", "<\\/"),
@@ -67,7 +63,12 @@ async def target_price_data(request: Request):
     def load():
         start, end = pricing.closed_week()
         cabinets = {item.store_slug: item for item in db.list_unit_economics_1c_cabinet_settings(stores)}
-        period_metrics = economics.load_product_metrics(stores, period_days=7, today=end)
+        period_metrics = economics.load_product_metrics(
+            stores,
+            period_days=7,
+            today=end,
+            article=selected_article.partition(" / ")[0].strip() if selected_article else None,
+        )
         catalogs = {}
         for slug in stores:
             inbound = stock_sheet_inbound.load(slug, "WB", db.get_stock_items(slug, "WB"))
@@ -111,6 +112,10 @@ async def target_price_data(request: Request):
             stores,
             start.isoformat(),
             end.isoformat(),
+            articles=tuple(
+                sorted({str(product["article"]) for products in catalogs.values() for product in products})
+            ),
+            inputs_only=True,
         ):
             margin_snapshots.setdefault(
                 (str(item["store_slug"]), str(item["article"])),
@@ -137,7 +142,7 @@ async def target_price_data(request: Request):
                 nm_id = article.partition(" / ")[0].strip()
                 reference = references.get((slug, article), {})
                 manager = str(reference.get("manager") or "")
-                if user is None or (user.role == Role.USER and not _manager_matches_user(manager, user)):
+                if user is None:
                     continue
                 product_metrics = period_metrics.get((slug, nm_id))
                 if product_metrics is None:
@@ -233,30 +238,13 @@ async def target_price_data(request: Request):
 async def _target_product_error(request: Request, store_slug: str, article: str):
     if store_slug not in STORES:
         return JSONResponse({"ok": False, "error": "Кабинет не найден"}, status_code=404)
-    if not has_scope(request.state.user, store_slug, "WB"):
+    if not has_store_marketplace(request.state.user, store_slug, "WB"):
         return JSONResponse({"ok": False, "error": "Нет доступа к этому кабинету"}, status_code=403)
-    if not has_section_access(
-        request.state.user,
-        SectionName.REPORT_TARGET_PRICE,
-        SectionAccessLevel.WRITE,
-    ):
+    if not is_active_user(request.state.user):
         return JSONResponse({"ok": False, "error": "Нет права изменять цели"}, status_code=403)
     catalog = await run_in_threadpool(db.get_catalog_items, store_slug, "WB")
     if article not in {str(item.get("article") or "") for item in catalog}:
         return JSONResponse({"ok": False, "error": "Товар не найден в актуальном каталоге"}, status_code=404)
-    user = coerce_user(request.state.user)
-    if user is not None and user.role == Role.USER:
-        references = await run_in_threadpool(db.get_unit_economics_1c_product_reference_rows, (store_slug,))
-        manager = next(
-            (
-                str(item.get("manager") or "")
-                for item in references
-                if str(item.get("article") or "") == article
-            ),
-            "",
-        )
-        if not _manager_matches_user(manager, user):
-            return JSONResponse({"ok": False, "error": "Нет доступа к этому товару"}, status_code=403)
     return None
 
 

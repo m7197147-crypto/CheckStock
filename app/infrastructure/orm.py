@@ -1,16 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import (
-    BigInteger,
-    Float,
-    ForeignKey,
-    Index,
-    Integer,
-    String,
-    Text,
-    UniqueConstraint,
-)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class OrmBase(DeclarativeBase):
@@ -40,6 +31,18 @@ class SupplyArrivalsSnapshotRecord(OrmBase):
     last_attempt: Mapped[str | None] = mapped_column(String)
     last_success: Mapped[str | None] = mapped_column(String)
     error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class SupplyArrivalStockRecord(OrmBase):
+    __tablename__ = "supply_arrival_stock"
+
+    source_key: Mapped[str] = mapped_column(String, primary_key=True)
+    supply_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    checked: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    marked_at: Mapped[str | None] = mapped_column(String)
+    marked_by: Mapped[str | None] = mapped_column(String)
+    marked_by_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class InboundSupplySnapshotRecord(OrmBase):
@@ -209,6 +212,18 @@ class SyncJobStateRecord(OrmBase):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class SyncJobScheduleRecord(OrmBase):
+    """Durable automatic schedule, independent of manual execution history."""
+
+    __tablename__ = "sync_job_schedules"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    next_run_at: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    active_run_id: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class SyncJobRunRecord(OrmBase):
     """One execution in the retained synchronization history."""
 
@@ -261,139 +276,8 @@ class UserRecord(OrmBase):
     google_email: Mapped[str] = mapped_column(String, nullable=False)
     login: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
-    role: Mapped[str] = mapped_column(String, nullable=False)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    can_edit_stock: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
-    can_manage_users: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[str] = mapped_column(String, nullable=False)
-    store_access: Mapped[list[UserStoreAccessRecord]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-    section_access: Mapped[list[UserSectionAccessRecord]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-    access_profile_record: Mapped[UserAccessProfileRecord | None] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-        uselist=False,
-    )
-    marketplace_access: Mapped[list[UserMarketplaceAccessRecord]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
-        lazy="selectin",
-    )
-
-
-class UserStoreAccessRecord(OrmBase):
-    __tablename__ = "user_store_access"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    store_slug: Mapped[str] = mapped_column(String, primary_key=True)
-    user: Mapped[UserRecord] = relationship(back_populates="store_access")
-
-
-class UserSectionAccessRecord(OrmBase):
-    __tablename__ = "user_section_access"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    section: Mapped[str] = mapped_column(String, primary_key=True)
-    access_level: Mapped[str] = mapped_column(String, nullable=False)
-    user: Mapped[UserRecord] = relationship(back_populates="section_access")
-
-
-class UserAccessProfileRecord(OrmBase):
-    __tablename__ = "user_access_profiles"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    profile: Mapped[str] = mapped_column(String, nullable=False)
-    user: Mapped[UserRecord] = relationship(back_populates="access_profile_record")
-
-
-class UserMarketplaceAccessRecord(OrmBase):
-    __tablename__ = "user_marketplace_access"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    store_slug: Mapped[str] = mapped_column(String, primary_key=True)
-    marketplace: Mapped[str] = mapped_column(String, primary_key=True)
-    user: Mapped[UserRecord] = relationship(back_populates="marketplace_access")
-
-
-class AccessRequestRecord(OrmBase):
-    __tablename__ = "access_requests"
-    __table_args__ = (
-        Index("ix_access_requests_status_created", "status", "created_at"),
-        Index("ix_access_requests_user_created", "user_id", "created_at"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    permission: Mapped[str] = mapped_column(String, nullable=False)
-    store_slug: Mapped[str] = mapped_column(String, nullable=False)
-    source_marketplace: Mapped[str] = mapped_column(String, nullable=False)
-    target_marketplace: Mapped[str | None] = mapped_column(String)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    context_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
-    duration_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7, server_default="7")
-    status: Mapped[str] = mapped_column(String, nullable=False, default="pending", server_default="pending")
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-    decided_at: Mapped[str | None] = mapped_column(String)
-    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    decision_note: Mapped[str | None] = mapped_column(Text)
-
-
-class TemporaryAccessGrantRecord(OrmBase):
-    __tablename__ = "temporary_access_grants"
-    __table_args__ = (
-        UniqueConstraint("request_id"),
-        Index("ix_access_grants_lookup", "user_id", "permission", "valid_until"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    request_id: Mapped[int] = mapped_column(
-        ForeignKey("access_requests.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    permission: Mapped[str] = mapped_column(String, nullable=False)
-    store_slug: Mapped[str] = mapped_column(String, nullable=False)
-    source_marketplace: Mapped[str] = mapped_column(String, nullable=False)
-    target_marketplace: Mapped[str | None] = mapped_column(String)
-    valid_from: Mapped[str] = mapped_column(String, nullable=False)
-    valid_until: Mapped[str] = mapped_column(String, nullable=False)
-    granted_by_user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
-    )
-    revoked_at: Mapped[str | None] = mapped_column(String)
-    revoked_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-
-
-class UserUiPreferenceRecord(OrmBase):
-    __tablename__ = "user_ui_preferences"
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    scope: Mapped[str] = mapped_column(String, primary_key=True)
-    preference_json: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class SessionRecord(OrmBase):
@@ -447,6 +331,9 @@ class FulfillmentTransitBatchRecord(OrmBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     store_slug: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String, nullable=False, default="ff_transfer", server_default="ff_transfer"
+    )
     from_fulfillment: Mapped[str] = mapped_column(String, nullable=False)
     from_marketplace: Mapped[str] = mapped_column(String, nullable=False)
     to_fulfillment: Mapped[str] = mapped_column(String, nullable=False)
@@ -656,6 +543,8 @@ class MarketplaceWarehouseStockRecord(OrmBase):
     warehouse: Mapped[str] = mapped_column(String, nullable=False)
     cluster: Mapped[str | None] = mapped_column(String)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    available_for_order: Mapped[int | None] = mapped_column(Integer)
+    reserved: Mapped[int | None] = mapped_column(Integer)
     updated_at: Mapped[str | None] = mapped_column(String)
 
 
@@ -952,6 +841,7 @@ class UnitEconomics1CCabinetSettingRecord(OrmBase):
     target_drr_percent: Mapped[float] = mapped_column(Float, nullable=False, default=8, server_default="8")
     target_roi_percent: Mapped[float] = mapped_column(Float, nullable=False, default=50, server_default="50")
     target_roi_by_code: Mapped[str] = mapped_column(Text, nullable=False, default="{}", server_default="{}")
+    hourly_d_coefficients: Mapped[str | None] = mapped_column(Text, nullable=True)
     buyout_period_days: Mapped[int] = mapped_column(Integer, nullable=False, default=14, server_default="14")
     acceptance_coefficient: Mapped[float] = mapped_column(
         Float, nullable=False, default=0, server_default="0"
@@ -1043,6 +933,7 @@ class UnitEconomics1CProductCategoryRecord(OrmBase):
     wb_subject_id: Mapped[int | None] = mapped_column(Integer)
     imt_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     category: Mapped[str | None] = mapped_column(String)
+    brand: Mapped[str | None] = mapped_column(String)
     category_key: Mapped[str | None] = mapped_column(String, index=True)
     created_at: Mapped[str | None] = mapped_column(String)
     synced_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -1056,6 +947,18 @@ class UnitEconomics1CProductReputationRecord(OrmBase):
     rating: Mapped[float | None] = mapped_column(Float)
     reviews_count: Mapped[int | None] = mapped_column(Integer)
     synced_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class WbProductRatingDailyRecord(OrmBase):
+    __tablename__ = "wb_product_rating_daily"
+    __table_args__ = (Index("ix_wb_product_rating_history", "store_slug", "nm_id", "day"),)
+
+    store_slug: Mapped[str] = mapped_column(String, primary_key=True)
+    nm_id: Mapped[str] = mapped_column(String, primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    rating: Mapped[float] = mapped_column(Float, nullable=False)
+    reviews_count: Mapped[int | None] = mapped_column(Integer)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class OzonProductReputationRecord(OrmBase):
@@ -1116,6 +1019,57 @@ class UnitEconomics1CDailyPriceRecord(OrmBase):
     orders_synced_at: Mapped[str | None] = mapped_column(String)
     retail_synced_at: Mapped[str | None] = mapped_column(String)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class WbHourlyPriceRecord(OrmBase):
+    __tablename__ = "wb_hourly_prices"
+    __table_args__ = (
+        Index("idx_wb_hourly_prices_nm", "nm_id", "observed_hour"),
+        Index("idx_wb_hourly_prices_store_time", "store_slug", "observed_at"),
+    )
+
+    store_slug: Mapped[str] = mapped_column(String, primary_key=True)
+    article: Mapped[str] = mapped_column(String, primary_key=True)
+    observed_hour: Mapped[str] = mapped_column(String, primary_key=True)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    nm_id: Mapped[str] = mapped_column(String, nullable=False)
+    size_id: Mapped[int | None] = mapped_column(BigInteger)
+    tech_size_name: Mapped[str | None] = mapped_column(String)
+    customer_price_with_spp: Mapped[float] = mapped_column(Float, nullable=False)
+    spp_percent: Mapped[float | None] = mapped_column(Float)
+    orders_turnover_rub: Mapped[float | None] = mapped_column(Float)
+    orders_turnover_updated_at: Mapped[str | None] = mapped_column(String)
+    customer_price_with_wallet: Mapped[float | None] = mapped_column(Float)
+    wallet_discount_percent: Mapped[float | None] = mapped_column(Float)
+    product_kopecks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    logistics_kopecks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    price_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    sale_conditions: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class WbDailyPriceRecord(OrmBase):
+    __tablename__ = "wb_daily_prices"
+    __table_args__ = (
+        Index("idx_wb_daily_prices_nm", "nm_id", "observed_day"),
+        Index("idx_wb_daily_prices_store_time", "store_slug", "observed_at"),
+    )
+
+    store_slug: Mapped[str] = mapped_column(String, primary_key=True)
+    article: Mapped[str] = mapped_column(String, primary_key=True)
+    observed_day: Mapped[str] = mapped_column(String, primary_key=True)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    nm_id: Mapped[str] = mapped_column(String, nullable=False)
+    size_id: Mapped[int | None] = mapped_column(BigInteger)
+    tech_size_name: Mapped[str | None] = mapped_column(String)
+    customer_price_with_spp: Mapped[float] = mapped_column(Float, nullable=False)
+    spp_percent: Mapped[float | None] = mapped_column(Float)
+    orders_turnover_updated_at: Mapped[str | None] = mapped_column(String)
+    customer_price_with_wallet: Mapped[float | None] = mapped_column(Float)
+    wallet_discount_percent: Mapped[float | None] = mapped_column(Float)
+    product_kopecks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    logistics_kopecks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    price_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    sale_conditions: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class UnitEconomics1CPriceSyncStateRecord(OrmBase):

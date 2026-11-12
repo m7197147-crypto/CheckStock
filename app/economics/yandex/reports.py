@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from app import db
-from app.access.access_control import restricts_unit_economics_to_manager
+from app.access.authentication import is_active_user
 from app.core.domain import MOSCOW_TIMEZONE
 from app.core.stores import STORES
 from app.economics.report_sources import ReportSources
@@ -17,21 +17,11 @@ from app.yandex import economics
 from app.yandex import economics_shared as shared
 from app.yandex.economics_calculation import VERSION, aggregate, calculate
 from app.yandex.economics_days import resolve_day, resolve_period
-
-
-def manager_matches(manager, user):
-    import re
-
-    def key(value):
-        return " ".join(re.sub(r"[^0-9a-zа-я]+", " ", str(value or "").casefold().replace("ё", "е")).split())
-
-    return user is not None and key(manager) == key(user.full_name)
+from app.yandex.order_basis import drr_percent, net_amount
 
 
 def permitted(manager, user):
-    return user is not None and (
-        not restricts_unit_economics_to_manager(user) or manager_matches(manager, user)
-    )
+    return is_active_user(user)
 
 
 def catalog(stores, user, *, sources=None):
@@ -41,7 +31,7 @@ def catalog(stores, user, *, sources=None):
     for store in stores:
         active = sources.read(yandex_assortment.active_articles, store)
         source = sources.read(yandex_source_values.get_values, store)
-        saved = sources.read(repository.sources, store)
+        saved = sources.read(repository.current_sources, store)
         for product in sources.read(db.get_catalog_items, store, MARKETPLACE):
             article = str(product["article"])
             reference = source.get(article, {})
@@ -76,7 +66,7 @@ def filter_options(rows, user):
                 )
             ],
         },
-        "manager_scope": {"restricted": restricts_unit_economics_to_manager(user), "matched": bool(rows)},
+        "manager_scope": {"restricted": False, "matched": bool(rows)},
     }
 
 
@@ -108,7 +98,7 @@ def daily_row(day, saved, order, ad, orders_known, ads_known, fallback_buyout):
         calculate(
             {**values, "advertising_mode": "actual"},
             advertising_spend=spend,
-            orders_count=count,
+            orders_count=saved["net_orders_count"],
             version=saved.get("calculation_version", VERSION),
         )
         if values
@@ -118,13 +108,13 @@ def daily_row(day, saved, order, ad, orders_known, ads_known, fallback_buyout):
     row = {
         "date": day,
         "available": saved.get("profit") is not None,
-        "complete": saved["complete"], "status": saved["status"],
-        "missing": saved["missing"], "messages": saved["messages"],
+        "complete": saved["complete"],
+        "status": saved["status"],
+        "missing": saved["missing"],
+        "messages": saved["messages"],
         "snapshot_available": bool(values),
         "orders_count": count,
-        "net_orders_count": max(count - int(order.get("cancel_count") or 0), 0)
-        if count is not None
-        else None,
+        "net_orders_count": saved["net_orders_count"],
         "advertising_spend": spend,
         "buyout_percent": buyout,
         "expected_buyouts": bought,
@@ -133,11 +123,11 @@ def daily_row(day, saved, order, ad, orders_known, ads_known, fallback_buyout):
         else 0.0
         if spend == 0
         else None,
-        "net_profit": result.get("margin"),
+        "net_profit": result.get("margin") if bought else None,
         "day_profit": saved.get("profit"),
         "day_purchase_value": saved.get("purchase_value"),
         "net_revenue": None
-        if result.get("margin") is None or values.get("purchase_price") is None
+        if not bought or result.get("margin") is None or values.get("purchase_price") is None
         else round(result["margin"] + values["purchase_price"], 2),
         **logistics_breakdown(result),
         "vat_value": costs.get("vat"),
@@ -221,10 +211,11 @@ def load_rows(
         for row in ads:
             by_ad[row["article"]][row["day"]] = row
         by_history = defaultdict(list)
-        for row in repository.history(store, days[0], days[-1]):
+        articles = tuple(product["article"] for product in products if product["store_slug"] == store)
+        for row in repository.history(store, days[0], days[-1], articles=articles):
             by_history[row["article"]].append(row)
         caches[store] = (
-            economics.context(store, sources=sources),
+            economics.context(store, sources=sources, include_day_inputs=False),
             by_history,
             by_order,
             order_days,
@@ -240,7 +231,7 @@ def load_rows(
         context, history, orders, order_days, ads, ad_days = caches[store]
         stocked = any((product["stock"].get(key) or 0) > 0 for key in ("fbs", "fbo", "fulfillment"))
         if for_target_price:
-            turnover = sum(float(row.get("orders_amount") or 0) for row in orders[article].values())
+            turnover = sum(net_amount(row) for row in orders[article].values())
             if not (stocked or (product["stock"].get("inbound") or 0) > 0 or turnover > 0):
                 continue
         else:
@@ -286,21 +277,32 @@ def load_rows(
             key: round(sum(float(row.get(key) or 0) for row in known_orders), 2) if order_days else None
             for key in ("orders_count", "orders_amount", "cancel_count", "cancel_amount")
         }
-        order_totals["orders_count"] = sum(row["orders_count"] for row in saved.values() if row["orders_count"] is not None) if any(row["orders_count"] is not None for row in saved.values()) else None
+        order_totals["orders_count"] = (
+            sum(row["orders_count"] for row in saved.values() if row["orders_count"] is not None)
+            if any(row["orders_count"] is not None for row in saved.values())
+            else None
+        )
         expected_amounts = [
-            float(orders[article].get(day, {}).get("orders_amount") or 0)
+            net_amount(orders[article].get(day, {}))
             * saved[day]["inputs"]["buyout_percent"]
             / 100
             for day in days
             if day in order_days and saved[day]["inputs"].get("buyout_percent") is not None
         ]
         expected_amount = sum(expected_amounts) if expected_amounts else None
-        weights = [(row["inputs"]["buyout_percent"], row["orders_count"]) for row in saved.values()
-                   if row["orders_count"] is not None and row["inputs"].get("buyout_percent") is not None]
+        weights = [
+            (row["inputs"]["buyout_percent"], row["net_orders_count"])
+            for row in saved.values()
+            if row["net_orders_count"] is not None and row["inputs"].get("buyout_percent") is not None
+        ]
         weight = sum(count for _, count in weights)
-        period_buyout = round(sum(percent * count for percent, count in weights) / weight, 2) if weight else None
+        period_buyout = (
+            round(sum(percent * count for percent, count in weights) / weight, 2) if weight else None
+        )
         stock, ad = product["stock"], product["advertising"]
-        known_spend = [row["advertising_spend"] for row in saved.values() if row["advertising_spend"] is not None]
+        known_spend = [
+            row["advertising_spend"] for row in saved.values() if row["advertising_spend"] is not None
+        ]
         spend = round(sum(known_spend), 2) if known_spend else None
         bought = sum(
             float(row.get("expected_buyouts") or 0) for row in saved.values() if row.get("profit") is not None
@@ -311,8 +313,8 @@ def load_rows(
             **identity,
             **order_totals,
             "marketplace": MARKETPLACE,
-            "net_orders_count": max(order_totals["orders_count"] - order_totals["cancel_count"], 0)
-            if order_totals["orders_count"] is not None and order_totals["cancel_count"] is not None
+            "net_orders_count": sum(row["net_orders_count"] for row in saved.values() if row["net_orders_count"] is not None)
+            if order_totals["orders_count"] is not None
             else None,
             "net_orders_amount": round(order_totals["orders_amount"] - order_totals["cancel_amount"], 2)
             if order_days
@@ -333,21 +335,17 @@ def load_rows(
             else 0.0
             if spend == 0
             else None,
-            "drr": round(spend / expected_amount * 100, 2)
-            if expected_amount and spend is not None
-            else 100.0
-            if spend
-            else 0.0
-            if spend == 0 and order_days
-            else None,
+            "drr": drr_percent(spend, expected_amount),
             "margin": period["margin"],
             "purchase_value": period["purchase_value"],
             "roi": period["roi"],
             "margin_orders_count": round(bought, 2),
             "margin_complete": period["complete"],
             "margin_missing_days": period["coverage"]["missing_dates"],
-            "missing_parameters": period["missing_parameters"], "messages": period["messages"],
-            "status": period["status"], "unavailable_days": period["unavailable_days"],
+            "missing_parameters": period["missing_parameters"],
+            "messages": period["messages"],
+            "status": period["status"],
+            "unavailable_days": period["unavailable_days"],
             "purchase_complete": period["purchase_complete"],
             "roi_purchase_value": period["roi_purchase_value"],
             "daily_calculations": daily,
@@ -390,8 +388,15 @@ def daily_details(context):
     """Expand only the displayed products from an already prepared report."""
     days, saved, orders, ads, order_days, ad_days, buyout = context
     return [
-        daily_row(day, saved.get(day, {}), orders.get(day, {}), ads.get(day, {}),
-                  day in order_days, day in ad_days, buyout)
+        daily_row(
+            day,
+            saved.get(day, {}),
+            orders.get(day, {}),
+            ads.get(day, {}),
+            day in order_days,
+            day in ad_days,
+            buyout,
+        )
         for day in days
     ]
 
@@ -401,6 +406,7 @@ def totals(rows):
     from app.economics.reporting import _unit_profit_report_totals
 
     result = _unit_profit_report_totals(rows)
+    result["drr"] = drr_percent(result["advertising_spend"], result["expected_buyout_amount"])
     for keys in (
         (
             "orders_count",

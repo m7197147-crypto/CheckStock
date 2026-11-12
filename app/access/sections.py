@@ -1,31 +1,37 @@
 from __future__ import annotations
 
-from app.access.access_control import (
-    ActionPermission,
-    accessible_marketplaces,
-    accessible_stores,
-    profile_has_permission,
-    restricts_unit_economics_to_manager,
-)
-from app.dto.identity import Role, SectionAccessLevel, SectionName, User, coerce_user
+from app.access.resources import accessible_stores
+from app.core.constants import OZON_ANALYTICS, Marketplace
+from app.dto.identity import SectionName, User
 
 S = SectionName
-L = SectionAccessLevel
 
 STOCK_SECTIONS = (
     S.STOCK_BALANCES,
     S.STOCK_TOTAL,
     S.STOCK_SUPPLIES,
     S.STOCK_INBOUND,
-    S.STOCK_RANDOMIZER,
     S.STOCK_COST_REPORT,
     S.STOCK_OPERATIONS,
 )
 UNIT_ECONOMICS_SECTIONS = (S.UNIT_ECONOMICS_WB, S.UNIT_ECONOMICS_OZON, S.UNIT_ECONOMICS_YANDEX)
-ANALYTICS_SECTIONS = (S.ANALYZER, S.ANALYTICS_SALES_API, S.EPHEMERIDES)
+ANALYTICS_SECTIONS = (
+    S.ANALYZER,
+    S.ANALYTICS_SALES_API,
+    S.EPHEMERIDES,
+    S.YANDEX_ANALYZER,
+    S.YANDEX_EPHEMERIDES,
+    S.YANDEX_SALES_API,
+    S.OZON_ANALYZER,
+    S.OZON_EPHEMERIDES,
+    S.OZON_SALES_API,
+)
 REPORT_SECTIONS = (
     S.REPORT_UNIT_PROFIT,
+    S.REPORT_SPP,
+    S.REPORT_RATING,
     S.REPORT_TARGET_PRICE,
+    S.REPORT_WB_CONDITIONS,
     S.REPORT_UNIT_PROFIT_YANDEX,
     S.REPORT_TARGET_PRICE_YANDEX,
 )
@@ -40,6 +46,10 @@ SECTION_GROUPS = (
     ("Администрирование", (S.ADMIN_USERS, S.ADMIN_GOOGLE_EXPORT, S.ADMIN_INTEGRATIONS)),
 )
 SECTION_LABELS = {
+    S.YANDEX_ANALYZER: "Аналитика · Анализатор ЯМ",
+    S.YANDEX_EPHEMERIDES: "Аналитика · Эфемериды ЯМ",
+    S.YANDEX_SALES_API: "Аналитика · Продажи по API ЯМ",
+    S.REPORT_WB_CONDITIONS: "Расходы без ИУ · WB",
     S.EPHEMERIDES: "Аналитика · Эфемериды WB",
     S.FINANCE_YANDEX: "Финансовые отчёты · Яндекс Маркет",
     S.ANALYTICS_SALES_API: "Аналитика · Продажи по API WB",
@@ -51,13 +61,14 @@ SECTION_LABELS = {
     S.STOCK_SUPPLIES: "Поставки",
     S.STOCK_INBOUND: "Поставки FBO",
     S.STOCK_ARRIVALS: "Расписание поставок",
-    S.STOCK_RANDOMIZER: "Рандомайзер",
     S.STOCK_COST_REPORT: "Движение и ЗЦ",
     S.STOCK_OPERATIONS: "История операций в кабинете",
     S.UNIT_ECONOMICS_1C: "Юнит-экономика 1С · Wildberries",
     S.UNIT_ECONOMICS_OZON: "Юнит-экономика 1С · Ozon",
     S.UNIT_ECONOMICS_YANDEX: "Юнит-экономика 1С · Яндекс Маркет",
     S.REPORT_UNIT_PROFIT: "Юниточная прибыль · WB",
+    S.REPORT_SPP: "Отчёт по СПП · WB",
+    S.REPORT_RATING: "Рейтинг товаров · WB",
     S.REPORT_UNIT_PROFIT_YANDEX: "Юниточная прибыль · ЯМ",
     S.REPORT_TARGET_PRICE: "Целевая цена · WB",
     S.REPORT_TARGET_PRICE_YANDEX: "Целевая цена · ЯМ",
@@ -67,6 +78,13 @@ SECTION_LABELS = {
     S.ADMIN_INTEGRATIONS: "API-ключи и фоновые выгрузки",
 }
 SECTION_PATHS = {
+    S.OZON_ANALYZER: OZON_ANALYTICS.pages + "/analyzer",
+    S.OZON_EPHEMERIDES: OZON_ANALYTICS.pages + "/ephemerides",
+    S.OZON_SALES_API: OZON_ANALYTICS.pages + "/sales-api",
+    S.YANDEX_ANALYZER: "/analytics/yandex-market/analyzer",
+    S.YANDEX_EPHEMERIDES: "/analytics/yandex-market/ephemerides",
+    S.YANDEX_SALES_API: "/analytics/yandex-market/sales-api",
+    S.REPORT_WB_CONDITIONS: "/sales/unit-economics-1c/reports/standard-costs",
     S.EPHEMERIDES: "/analytics/ephemerides",
     S.FINANCE_YANDEX: "/finance-reports/yandex",
     S.ANALYTICS_SALES_API: "/analytics/sales-api",
@@ -80,13 +98,14 @@ SECTION_PATHS = {
     S.STOCK_SUPPLIES: "/stock/supplies",
     S.STOCK_INBOUND: "/stock/inbound",
     S.STOCK_ARRIVALS: "/supply-schedule",
-    S.STOCK_RANDOMIZER: "/stock/randomizer",
     S.STOCK_COST_REPORT: "/stock/cost-report",
     S.STOCK_OPERATIONS: "/stock",
     S.UNIT_ECONOMICS_1C: "/sales/unit-economics-1c",
     S.UNIT_ECONOMICS_OZON: "/sales/unit-economics-1c/ozon",
     S.UNIT_ECONOMICS_YANDEX: "/sales/unit-economics-1c/yandex-market",
     S.REPORT_UNIT_PROFIT: "/sales/unit-economics-1c/reports/unit-profit",
+    S.REPORT_SPP: "/sales/unit-economics-1c/reports/spp",
+    S.REPORT_RATING: "/sales/unit-economics-1c/reports/rating",
     S.REPORT_TARGET_PRICE: "/sales/unit-economics-1c/reports/target-price",
     S.AI_AGENTS: "/ai-agents",
     S.ADMIN_USERS: "/admin",
@@ -94,8 +113,12 @@ SECTION_PATHS = {
     S.ADMIN_INTEGRATIONS: "/admin/integrations",
 }
 SECTION_DESCRIPTIONS = {
+    S.YANDEX_ANALYZER: "Каталог, недельные заказы, эффективность и записи Яндекс Маркета.",
+    S.YANDEX_EPHEMERIDES: "Недели, снимки остатков и комментарии Яндекс Маркета.",
+    S.YANDEX_SALES_API: "Заказы и отмены Яндекс Маркета по датам.",
+    S.REPORT_WB_CONDITIONS: "Сравнение калькулятора с тарифами WB по складским остаткам.",
     S.EPHEMERIDES: "Сравнение недель WB, оборот и комментарии с историей изменений.",
-    S.FINANCE_YANDEX: "Финансовый итог целого магазина: реализация, расходы, закупка и выплаты. Недоступен при товарных ограничениях.",
+    S.FINANCE_YANDEX: "Финансовый итог целого магазина: реализация, расходы, закупка и выплаты.",
     S.ANALYTICS_SALES_API: "Заказы и отмены из воронки WB: период, дни, фильтры и экспорт.",
     S.ANALYZER: "Товары WB, воронка, эффективность, недельные заказы и рабочие записи.",
     S.REPORT_UNIT_PROFIT_YANDEX: "Прибыль ЯМ за период, дневная история и Excel.",
@@ -107,18 +130,19 @@ SECTION_DESCRIPTIONS = {
     S.STOCK_SUPPLIES: "План поставок: просмотр, добавление и изменение ручных записей.",
     S.STOCK_INBOUND: "Входящие поставки маркетплейсов; изменение разрешает ручное обновление.",
     S.STOCK_ARRIVALS: "Расписание грузов по доступным кабинетам. Просмотр и обновление разрешает ручную загрузку из Google Таблицы.",
-    S.STOCK_RANDOMIZER: "Сверка остатков WB; изменение разрешает выбирать новый артикул.",
     S.STOCK_COST_REPORT: "Движение товаров, закупочная стоимость и отметки перевода на FBS.",
     S.STOCK_OPERATIONS: "История движений внутри кабинета и выгрузка операций.",
     S.UNIT_ECONOMICS_1C: "Таблица WB, расчёты, цены и параметры товаров.",
-    S.UNIT_ECONOMICS_OZON: "Вкладка Ozon находится в разработке.",
+    S.UNIT_ECONOMICS_OZON: "Товары Ozon, калькулятор, история показателей и настройки кабинета.",
     S.UNIT_ECONOMICS_YANDEX: "Товары Яндекс Маркета, калькулятор и настройки выкупа.",
     S.REPORT_UNIT_PROFIT: "Прибыль за выбранный период и выгрузка в Excel.",
+    S.REPORT_SPP: "Сравнение СПП с предшествующим периодом той же длины.",
+    S.REPORT_RATING: "Рейтинг товаров WB и сравнение равных периодов.",
     S.REPORT_TARGET_PRICE: "Рекомендованные цены; изменение разрешает задавать цели товара.",
-    S.AI_AGENTS: "Просмотр своих API-ключей; изменение разрешает выпуск и отзыв. Данные ограничены правами вкладок.",
-    S.ADMIN_USERS: "Доступна администраторам. Изменение — управление сотрудниками в пределах своей роли.",
-    S.ADMIN_GOOGLE_EXPORT: "Только суперадминистратор: настройки и запуск выгрузки.",
-    S.ADMIN_INTEGRATIONS: "Только суперадминистратор: ключи маркетплейсов и фоновые задания.",
+    S.AI_AGENTS: "Просмотр, выпуск и отзыв собственных API-ключей.",
+    S.ADMIN_USERS: "Создание сотрудников, блокировка, смена паролей и журнал действий.",
+    S.ADMIN_GOOGLE_EXPORT: "Настройки и запуск выгрузки.",
+    S.ADMIN_INTEGRATIONS: "Ключи маркетплейсов и фоновые задания.",
 }
 SECTION_PARENTS = {
     **{section: S.STOCK for section in STOCK_SECTIONS},
@@ -131,37 +155,37 @@ SECTION_PARENTS = {
             S.UNIT_ECONOMICS_OZON,
             S.UNIT_ECONOMICS_YANDEX,
             S.REPORT_UNIT_PROFIT,
+            S.REPORT_SPP,
+            S.REPORT_RATING,
             S.REPORT_TARGET_PRICE,
+            S.REPORT_WB_CONDITIONS,
             S.REPORT_UNIT_PROFIT_YANDEX,
             S.REPORT_TARGET_PRICE_YANDEX,
         )
     },
 }
-READ_ONLY_SECTIONS = {
-    S.FINANCE_YANDEX,
-    S.ANALYTICS_SALES_API,
-    S.STOCK_TOTAL,
-    S.STOCK_OPERATIONS,
-    S.UNIT_ECONOMICS_OZON,
-    S.REPORT_UNIT_PROFIT,
-    S.REPORT_UNIT_PROFIT_YANDEX,
-}
-SUPERADMIN_SECTIONS = {S.ADMIN_GOOGLE_EXPORT, S.ADMIN_INTEGRATIONS}
 SECTION_MARKETPLACES = {
+    S.OZON_ANALYZER: Marketplace.OZON,
+    S.OZON_EPHEMERIDES: Marketplace.OZON,
+    S.OZON_SALES_API: Marketplace.OZON,
+    S.YANDEX_ANALYZER: "YANDEX MARKET",
+    S.YANDEX_EPHEMERIDES: "YANDEX MARKET",
+    S.YANDEX_SALES_API: "YANDEX MARKET",
+    S.REPORT_WB_CONDITIONS: "WB",
     S.EPHEMERIDES: "WB",
     S.FINANCE_YANDEX: "YANDEX MARKET",
     S.ANALYTICS_SALES_API: "WB",
     S.ANALYZER: "WB",
     S.REPORT_UNIT_PROFIT_YANDEX: "YANDEX MARKET",
     S.REPORT_TARGET_PRICE_YANDEX: "YANDEX MARKET",
-    S.STOCK_RANDOMIZER: "WB",
     S.UNIT_ECONOMICS_WB: "WB",
     S.UNIT_ECONOMICS_OZON: "OZON",
     S.UNIT_ECONOMICS_YANDEX: "YANDEX MARKET",
     S.REPORT_UNIT_PROFIT: "WB",
+    S.REPORT_SPP: "WB",
+    S.REPORT_RATING: "WB",
     S.REPORT_TARGET_PRICE: "WB",
 }
-_ACCESS_LEVEL = {L.NONE: 0, L.READ: 1, L.WRITE: 2}
 
 
 def _under(path: str, prefix: str) -> bool:
@@ -171,6 +195,22 @@ def _under(path: str, prefix: str) -> bool:
 def section_for_path(path: str) -> SectionName | None:
     path = path.rstrip("/") or "/"
     for prefix, section in (
+        (OZON_ANALYTICS.pages + "/analyzer", S.OZON_ANALYZER),
+        (OZON_ANALYTICS.api + "/analyzer", S.OZON_ANALYZER),
+        (OZON_ANALYTICS.api + "/settings", S.OZON_ANALYZER),
+        (OZON_ANALYTICS.pages + "/ephemerides", S.OZON_EPHEMERIDES),
+        (OZON_ANALYTICS.api + "/ephemerides", S.OZON_EPHEMERIDES),
+        (OZON_ANALYTICS.pages + "/sales-api", S.OZON_SALES_API),
+        (OZON_ANALYTICS.api + "/sales-api", S.OZON_SALES_API),
+        ("/analytics/yandex-market/analyzer", S.YANDEX_ANALYZER),
+        ("/api/analytics/yandex-market/analyzer", S.YANDEX_ANALYZER),
+        ("/api/analytics/yandex-market/settings", S.YANDEX_ANALYZER),
+        ("/analytics/yandex-market/ephemerides", S.YANDEX_EPHEMERIDES),
+        ("/api/analytics/yandex-market/ephemerides", S.YANDEX_EPHEMERIDES),
+        ("/analytics/yandex-market/sales-api", S.YANDEX_SALES_API),
+        ("/api/analytics/yandex-market/sales-api", S.YANDEX_SALES_API),
+        ("/sales/unit-economics-1c/reports/standard-costs", S.REPORT_WB_CONDITIONS),
+        ("/api/unit-economics-1c/reports/standard-costs", S.REPORT_WB_CONDITIONS),
         ("/finance-reports/yandex", S.FINANCE_YANDEX),
         ("/api/finance-reports/yandex", S.FINANCE_YANDEX),
         ("/analytics/sales-api", S.ANALYTICS_SALES_API),
@@ -189,10 +229,13 @@ def section_for_path(path: str) -> SectionName | None:
         ("/stock/inbound", S.STOCK_INBOUND),
         ("/stock/arrivals", S.STOCK_ARRIVALS),
         ("/supply-schedule", S.STOCK_ARRIVALS),
-        ("/stock/randomizer", S.STOCK_RANDOMIZER),
         ("/stock/cost-report", S.STOCK_COST_REPORT),
         ("/sales/unit-economics-1c/reports/unit-profit", S.REPORT_UNIT_PROFIT),
         ("/api/unit-economics-1c/reports/unit-profit", S.REPORT_UNIT_PROFIT),
+        ("/sales/unit-economics-1c/reports/spp", S.REPORT_SPP),
+        ("/api/unit-economics-1c/reports/spp", S.REPORT_SPP),
+        ("/sales/unit-economics-1c/reports/rating", S.REPORT_RATING),
+        ("/api/unit-economics-1c/reports/rating", S.REPORT_RATING),
         ("/sales/unit-economics-1c/reports/target-price", S.REPORT_TARGET_PRICE),
         ("/api/unit-economics-1c/reports/target-price", S.REPORT_TARGET_PRICE),
         ("/sales/unit-economics-1c/ozon", S.UNIT_ECONOMICS_OZON),
@@ -219,92 +262,6 @@ def section_for_path(path: str) -> SectionName | None:
     return None
 
 
-def _legacy_level(user: User, section: SectionName) -> SectionAccessLevel:
-    if user.access_profile is not None:
-        if section is S.STOCK:
-            return L.WRITE if profile_has_permission(user, ActionPermission.STOCK_BALANCE_VIEW) else L.NONE
-        markets = accessible_marketplaces(user)
-        if "WB" not in markets:
-            return (
-                L.READ
-                if "YANDEX MARKET" in markets
-                and profile_has_permission(user, ActionPermission.UNIT_ECONOMICS_VIEW)
-                else L.NONE
-            )
-        if profile_has_permission(user, ActionPermission.UNIT_ECONOMICS_EDIT):
-            return L.WRITE
-        return L.READ if profile_has_permission(user, ActionPermission.UNIT_ECONOMICS_VIEW) else L.NONE
-    configured = user.section_access.get(section)
-    if configured is not None:
-        return configured
-    return L.READ if section is S.STOCK and not user.can_edit_stock else L.WRITE
-
-
-def access_limit(user: User | None, section: SectionName) -> SectionAccessLevel:
-    user = coerce_user(user)
-    if user is None or section not in SECTION_PATHS:
-        return L.NONE
-    if user.role is Role.SUPERADMIN:
-        return L.READ if section in READ_ONLY_SECTIONS else L.WRITE
-    if section in SUPERADMIN_SECTIONS:
-        return L.NONE
-    if section is S.FINANCE_YANDEX and restricts_unit_economics_to_manager(user):
-        return L.NONE
-    if section is S.ADMIN_USERS:
-        return (L.WRITE if user.can_manage_users else L.READ) if user.role is Role.ADMIN else L.NONE
-    if user.access_profile is not None or user.access_scopes:
-        marketplace = SECTION_MARKETPLACES.get(section)
-        if marketplace and marketplace not in accessible_marketplaces(user):
-            return L.NONE
-        if user.access_profile is not None and (
-            section in UNIT_ECONOMICS_SECTIONS or section in REPORT_SECTIONS or section in ANALYTICS_SECTIONS
-        ):
-            if not profile_has_permission(user, ActionPermission.UNIT_ECONOMICS_VIEW):
-                return L.NONE
-            if not profile_has_permission(user, ActionPermission.UNIT_ECONOMICS_EDIT):
-                return L.READ
-        if section is S.STOCK_TOTAL and not profile_has_permission(user, ActionPermission.STOCK_TOTAL_VIEW):
-            return L.NONE
-    return L.READ if section in READ_ONLY_SECTIONS else L.WRITE
-
-
-def default_access_level(user: User, section: SectionName) -> SectionAccessLevel:
-    if section is S.FINANCE_YANDEX:
-        return L.NONE
-    if section in ANALYTICS_SECTIONS:
-        return access_level(user, S.UNIT_ECONOMICS_WB)
-    if section is S.AI_AGENTS:
-        return (
-            L.WRITE
-            if any(
-                has_access(user, item)
-                for item in (*STOCK_SECTIONS, S.STOCK_ARRIVALS, *UNIT_ECONOMICS_SECTIONS, *REPORT_SECTIONS)
-            )
-            else L.NONE
-        )
-    if section is S.ADMIN_USERS or section in SUPERADMIN_SECTIONS:
-        return access_limit(user, section)
-    parent = SECTION_PARENTS.get(section, section)
-    return _legacy_level(user, parent)
-
-
-def access_level(user: User | None, section: SectionName) -> SectionAccessLevel:
-    user = coerce_user(user)
-    if user is None or section not in SECTION_PATHS:
-        return L.NONE
-    if user.role is Role.SUPERADMIN:
-        return L.WRITE
-    if section in {S.STOCK, S.UNIT_ECONOMICS_1C}:
-        return _legacy_level(user, section)
-    configured = user.section_access.get(section)
-    level = configured if configured is not None else default_access_level(user, section)
-    return min((level, access_limit(user, section)), key=_ACCESS_LEVEL.get)
-
-
-def has_access(user: User | None, section: SectionName, required: SectionAccessLevel = L.READ) -> bool:
-    return _ACCESS_LEVEL[access_level(user, section)] >= _ACCESS_LEVEL[required]
-
-
 def section_path(user: User | None, section: SectionName) -> str:
     if section is S.STOCK_OPERATIONS:
         stores = accessible_stores(user)
@@ -313,14 +270,14 @@ def section_path(user: User | None, section: SectionName) -> str:
 
 
 def landing_path(user: User | None) -> str:
-    for section in (item for _, group in SECTION_GROUPS for item in group):
-        if has_access(user, section):
-            return section_path(user, section)
-    return "/access-denied"
+    return "/stock"
 
 
 def active_section(active: str) -> SectionName | None:
     return {
+        "yandex_analyzer": S.YANDEX_ANALYZER,
+        "yandex_ephemerides": S.YANDEX_EPHEMERIDES,
+        "yandex_sales_api": S.YANDEX_SALES_API,
         "finance_yandex": S.FINANCE_YANDEX,
         "analytics_sales_api": S.ANALYTICS_SALES_API,
         "analyzer": S.ANALYZER,
@@ -332,13 +289,15 @@ def active_section(active: str) -> SectionName | None:
         "unit_1c_reports_yandex": S.REPORT_UNIT_PROFIT_YANDEX,
         "unit_1c_target_price_yandex": S.REPORT_TARGET_PRICE_YANDEX,
         "unit_1c_reports": S.REPORT_UNIT_PROFIT,
+        "unit_1c_spp_report": S.REPORT_SPP,
+        "unit_1c_rating_report": S.REPORT_RATING,
         "unit_1c_target_price": S.REPORT_TARGET_PRICE,
+        "wb_standard_costs": S.REPORT_WB_CONDITIONS,
         "stock": S.STOCK_BALANCES,
         "stock_total": S.STOCK_TOTAL,
         "stock_supplies": S.STOCK_SUPPLIES,
         "stock_inbound": S.STOCK_INBOUND,
         "stock_arrivals": S.STOCK_ARRIVALS,
-        "stock_randomizer": S.STOCK_RANDOMIZER,
         "stock_cost_report": S.STOCK_COST_REPORT,
         "stock_operations": S.STOCK_OPERATIONS,
         "ai_agents": S.AI_AGENTS,

@@ -1,5 +1,6 @@
 import json
 
+from app.dto.ozon_source import OzonSourceCatalogItem, OzonSourceValues
 from app.dto.unit_economics_1c import (
     UnitEconomics1CCabinetSettings,
     UnitEconomics1CCabinetSettingsRequest,
@@ -91,13 +92,14 @@ def list_purchase_price_stock_items() -> list[dict]:
         conn.close()
 
 
-def list_ozon_source_items() -> list[dict]:
+def list_ozon_source_items() -> tuple[OzonSourceCatalogItem, ...]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT id, store_slug, article, mp_product_id FROM stock_items "
-            "WHERE marketplace='OZON' AND is_service=0 AND mp_product_id IS NOT NULL"
+            "SELECT id, store_slug, article, mp_product_id, mp_sku FROM stock_items "
+            "WHERE marketplace='OZON' AND is_service=0 "
+            "AND (mp_product_id IS NOT NULL OR mp_sku IS NOT NULL)"
         ).fetchall()
-    return [dict(row) for row in rows]
+    return tuple(OzonSourceCatalogItem.model_validate(dict(row)) for row in rows)
 
 
 def get_ozon_source_values(store_slugs: tuple[str, ...]) -> dict[tuple[str, str], dict]:
@@ -204,9 +206,9 @@ def replace_product_categories(store_slug: str, rows: list[dict], synced_at: str
             conn.executemany(
                 """
                 INSERT INTO unit_economics_1c_product_categories
-                    (stock_item_id, wb_subject_id, imt_id, category, category_key,
+                    (stock_item_id, wb_subject_id, imt_id, category, brand, category_key,
                      created_at, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -214,6 +216,7 @@ def replace_product_categories(store_slug: str, rows: list[dict], synced_at: str
                         row.get("wb_subject_id"),
                         row.get("imt_id"),
                         row.get("category"),
+                        row.get("brand"),
                         row.get("category_key"),
                         row.get("created_at"),
                         synced_at,
@@ -293,7 +296,7 @@ def get_product_reference_rows(store_slugs: tuple[str, ...]) -> list[dict]:
                source.stock_status, source.stock_end_week,
                source.supplier_external_raw, source.fact_sales, source.plan_sales,
                source.source_sheet_title, source.source_row, source.synced_at AS source_synced_at,
-               category.wb_subject_id, category.imt_id, category.category,
+               category.wb_subject_id, category.imt_id, category.category, category.brand,
                category.created_at AS card_created_at,
                commission.commission_percent AS subject_commission_percent
           FROM stock_items items
@@ -494,12 +497,15 @@ def get_funnel_daily_order_rows(
     store_slugs: tuple[str, ...],
     date_from: str,
     date_to: str,
+    *,
+    article: str | None = None,
 ) -> list[dict]:
     """Return raw WB funnel orderCount and orderSum values by product and day."""
 
     if not store_slugs:
         return []
     placeholders = ", ".join("?" for _ in store_slugs)
+    article_filter = " AND article=?" if article is not None else ""
     conn = get_connection()
     rows = conn.execute(
         f"""
@@ -513,20 +519,22 @@ def get_funnel_daily_order_rows(
          WHERE store_slug IN ({placeholders})
            AND day>=? AND day<=?
            AND source_version>=3
+           {article_filter}
          ORDER BY store_slug, article, day
         """,
-        (*store_slugs, date_from, date_to),
+        (*store_slugs, date_from, date_to, *((article,) if article is not None else ())),
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
-def get_funnel_product_metrics(store_slugs: tuple[str, ...]) -> list[dict]:
+def get_funnel_product_metrics(store_slugs: tuple[str, ...], *, article: str | None = None) -> list[dict]:
     """Return the latest persisted seven-day funnel metrics by product."""
 
     if not store_slugs:
         return []
     placeholders = ", ".join("?" for _ in store_slugs)
+    article_filter = " AND article=?" if article is not None else ""
     conn = get_connection()
     rows = conn.execute(
         f"""
@@ -538,23 +546,23 @@ def get_funnel_product_metrics(store_slugs: tuple[str, ...]) -> list[dict]:
           FROM wb_funnel_product_metrics
          WHERE store_slug IN ({placeholders})
            AND source_version>=2
+           {article_filter}
          ORDER BY store_slug, article
         """,
-        store_slugs,
+        (*store_slugs, *((article,) if article is not None else ())),
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
 
 
 def replace_source_values(
-    rows: list[dict],
+    rows: list[dict] | tuple[OzonSourceValues, ...],
     team_commissions: dict[str, float],
     synced_at: str,
     *,
     marketplace: str = "WB",
 ) -> int:
-    """Atomically replace the current Google Sheets snapshot without keeping history."""
-
+    source_rows = [row.model_dump() if isinstance(row, OzonSourceValues) else row for row in rows]
     columns = (
         "stock_item_id",
         "purchase_price",
@@ -592,7 +600,7 @@ def replace_source_values(
                 """,
                 (
                     [row.get(column) if column != "synced_at" else synced_at for column in columns]
-                    for row in rows
+                    for row in source_rows
                 ),
             )
             conn.executemany(
@@ -632,6 +640,9 @@ def get_cabinet_settings(store_slug: str) -> UnitEconomics1CCabinetSettings:
         return UnitEconomics1CCabinetSettings(store_slug=store_slug)
     payload = dict(row)
     payload["target_roi_by_code"] = json.loads(payload.get("target_roi_by_code") or "{}")
+    hourly_d = payload.pop("hourly_d_coefficients", None)
+    if hourly_d is not None:
+        payload["hourly_d_coefficients"] = json.loads(hourly_d)
     return UnitEconomics1CCabinetSettings.model_validate(payload)
 
 
@@ -648,11 +659,19 @@ def save_cabinet_settings(
     updated_by_name: str,
 ) -> UnitEconomics1CCabinetSettings:
     payload = values.model_dump(mode="python")
-    for field in ("default_buyout_percent", "target_drr_percent", "target_roi_percent", "target_roi_by_code"):
+    for field in (
+        "default_buyout_percent",
+        "target_drr_percent",
+        "target_roi_percent",
+        "target_roi_by_code",
+        "hourly_d_coefficients",
+    ):
         if field not in values.model_fields_set:
             payload.pop(field, None)
     if "target_roi_by_code" in payload:
         payload["target_roi_by_code"] = json.dumps(payload["target_roi_by_code"], allow_nan=False)
+    if "hourly_d_coefficients" in payload:
+        payload["hourly_d_coefficients"] = json.dumps(payload["hourly_d_coefficients"], allow_nan=False)
     columns = tuple(payload)
     with WRITE_LOCK:
         conn = get_connection()
@@ -956,7 +975,16 @@ def get_daily_margin_snapshots(
     from app.repositories import daily_economics
 
     result = {(row["store_slug"], row["article"], row["day"]): dict(row) for row in rows}
-    for row in daily_economics.records("WB", store_slugs, date_from, date_to, articles=articles, compact=True, inputs_only=inputs_only, include_reference=include_reference):
+    for row in daily_economics.records(
+        "WB",
+        store_slugs,
+        date_from,
+        date_to,
+        articles=articles,
+        compact=True,
+        inputs_only=inputs_only,
+        include_reference=include_reference,
+    ):
         snapshot = daily_economics.wb_report_row(row)
         if include_reference:
             snapshot["reference_json"] = row["reference_json"]
@@ -1145,10 +1173,13 @@ def replace_daily_advertising(
     return len(rows)
 
 
-def get_daily_advertising(store_slugs: tuple[str, ...], date_from: str, date_to: str) -> list[dict]:
+def get_daily_advertising(
+    store_slugs: tuple[str, ...], date_from: str, date_to: str, *, article: str | None = None
+) -> list[dict]:
     if not store_slugs:
         return []
     placeholders = ", ".join("?" for _ in store_slugs)
+    article_filter = " AND nm_id=?" if article is not None else ""
     conn = get_connection()
     rows = conn.execute(
         f"""
@@ -1157,9 +1188,10 @@ def get_daily_advertising(store_slugs: tuple[str, ...], date_from: str, date_to:
          WHERE store_slug IN ({placeholders})
            AND marketplace='WB'
            AND day>=? AND day<=?
+           {article_filter}
          ORDER BY store_slug, nm_id, day
         """,
-        (*store_slugs, date_from, date_to),
+        (*store_slugs, date_from, date_to, *((article,) if article is not None else ())),
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]

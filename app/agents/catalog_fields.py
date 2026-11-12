@@ -60,6 +60,21 @@ def enrich(name, fields):
             add(*entry.split(":", 2))
     if name == "advertising-campaigns":
         fields[:] = [f for f in fields if f["name"] != "cpc_rub"]  # not returned by this method
+    if name == "standard-costs":
+        scenario_fields = {"margin": "Прибыль, ₽/шт.", "roi": "ROI, %"}
+        for prefix, label in (("profit", "Без ИУ"), ("current_profit", "С ИУ")):
+            for key, title in scenario_fields.items():
+                if prefix == "profit" or key in {"margin", "roi"}:
+                    add(prefix + "." + key, label + ": " + title, "number|null")
+            add(prefix + ".complete", label + ": полнота расчёта", "bool")
+            add(prefix + ".missing", label + ": причины неполноты", "array")
+        for key, title, kind in (
+            ("delta.margin", "Разница прибыли: без ИУ минус с ИУ, ₽/шт.", "number|null"),
+            ("delta.roi", "Разница ROI, процентные пункты", "number|null"),
+            ("calculator_date", "Дата цены калькулятора", "date|null"),
+            ("warnings", "Допущения и предупреждения строки", "array"),
+        ):
+            add(key, title, kind)
     if name == "profit-calculator":
         from app.agents.calculator import INPUT_LABELS, calculator
 
@@ -133,7 +148,7 @@ def enrich(name, fields):
         key = f["name"]
         root = (
             name in root_methods
-            or key.startswith("context.")
+            or key.startswith(("context.", "totals."))
             or (name == "loss-products" and key == "excluded_incomplete_products")
         )
         f["path"] = ("[]." if name == "stores" else "" if root else "rows[].") + key

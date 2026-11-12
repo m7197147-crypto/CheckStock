@@ -16,14 +16,29 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.sqlite-journal
 data/*.tmp
 data/*.dump
 data/exports/
+data/scheduler-heartbeat.json
+data/.scheduler-heartbeat.json.*.tmp
 data/yandex-storefront/
 data/wb-storefront/
 data/.sync-locks/
 data/backups/
+data/diagnostics/
+data/logs/
+data/*.log
 
 identifier.sqlite
 
 legacy/
+
+*.patch
+
+.outputs
+/outputs/
+.pytest_cache/

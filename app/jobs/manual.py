@@ -8,7 +8,8 @@ from app.exports import ftp_schedule as ftp_export_schedule
 from app.jobs import background
 from app.jobs import locks as sync_locks
 from app.jobs import settings as sync_settings
-from app.jobs.tracking import set_next_run
+from app.jobs.scheduling import BackgroundJob
+from app.jobs.tracking import result_error, set_next_run
 from app.repositories import core
 
 
@@ -72,6 +73,7 @@ def callback_for(name: str) -> Callable[[], object]:
     jobs = {
         job.name: job
         for job in (*background._jobs(asyncio.Event()), *background._unit_economics_1c_price_jobs())
+        if isinstance(job, BackgroundJob)
     }
     overrides = {
         background.ya_category_commissions.JOB: lambda: background.ya_category_commissions.sync_all(
@@ -102,6 +104,9 @@ def callback_for(name: str) -> Callable[[], object]:
         "wb_token_check": lambda: background.token_watch.refresh_token_info(
             sync_settings.enabled_stores("wb_token_check")
         ),
+        "wb_hourly_prices_sync": lambda: background._wb_hourly_price_job(
+            background.ApplicationContainer().wb_hourly_prices
+        ).callback(),
         "yandex_storefront_prices_sync": _storefront_now,
         "wb_advertising_sync": lambda: background.advertising_sync.sync_stores(
             sync_settings.enabled_stores("wb_advertising_sync")
@@ -116,10 +121,13 @@ def callback_for(name: str) -> Callable[[], object]:
 
     def run():
         with sync_settings.manual_run(name):
+            succeeded = False
             try:
-                return callback()
+                result = callback()
+                succeeded = result_error(result) is None
+                return result
             finally:
                 if ftp_export.platform_for_job(name):
-                    set_next_run(name, ftp_export_schedule.next_delay_seconds(name))
+                    set_next_run(name, ftp_export_schedule.next_delay_seconds(name, succeeded=succeeded))
 
     return run

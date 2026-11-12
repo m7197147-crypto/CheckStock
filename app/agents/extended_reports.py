@@ -1,18 +1,40 @@
 """Read-only adapters for existing WB data; no external sync is triggered."""
 
 import json
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from pydantic import JsonValue
 
-from app.access.access_control import scope_pairs
+from app.access.resources import store_marketplace_pairs
 from app.agents import reports
-from app.config import settings
+from app.core.constants import INBOUND_SCHEDULE
+from app.dto.agent_query import ReportQuery
 from app.dto.identity import SectionName as S
+from app.dto.identity import User
 
 EXTRA_SPECS = {
+    "standard-costs": (
+        S.REPORT_WB_CONDITIONS,
+        True,
+        "article search",
+        "Latest saved WB standard-cost report enriched with current local calculator data. Per-unit profit/ROI without/with individual terms, deltas and report status. Not actual weekly profit. No date filter or live sync; inspect snapshot dates and missing inputs.",
+    ),
+    "spp-hourly": (
+        S.UNIT_ECONOMICS_WB,
+        True,
+        "date_from date_to article",
+        "Saved WB hourly observations: timestamp, buyer price, SPP percent and wallet price. Dates are Moscow days. Closed days are compacted to daily history; missing observations are not zero.",
+    ),
+    "spp-daily": (
+        S.UNIT_ECONOMICS_WB,
+        True,
+        "date_from date_to article",
+        "Saved WB daily averages: day, last observation, buyer price, SPP percent and wallet price. Reads closed-day aggregates without recalculation. Missing days or values are unknown, not zero.",
+    ),
     "stock-history": (
         S.STOCK_BALANCES,
         True,
@@ -52,7 +74,7 @@ EXTRA_SPECS = {
 }
 
 
-def stock_history(query):
+def stock_history(query: ReportQuery) -> list[dict[str, JsonValue]]:
     params = (query.store, query.marketplace, str(query.date_from), str(query.date_to))
     rows = reports.read(
         "SELECT article, day, scheme, quantity, captured_at AS updated_at, NULL AS warehouse "
@@ -69,7 +91,7 @@ def stock_history(query):
     return reports.filtered(rows, query)
 
 
-def orders(query, user):
+def orders(query: ReportQuery, user: User | None) -> list[dict[str, JsonValue]]:
     clause, dates = reports.date_clause(query, "ordered_at")
     # The registry normalizes timestamps to Moscow; ISO date boundaries are inclusive/exclusive.
     rows = reports.read(
@@ -98,7 +120,7 @@ def orders(query, user):
 def inbound(request, query):
     snapshots = request.app.state.container.inbound_supplies.report(((query.store, query.marketplace),))
     rows, sources = [], []
-    cutoff = datetime.now(UTC) - timedelta(seconds=max(settings.inbound_sync_interval_seconds * 2, 3600))
+    cutoff = datetime.now(UTC) - timedelta(seconds=INBOUND_SCHEDULE.stale_after_seconds)
     for snapshot in snapshots:
         if (snapshot.store_slug, snapshot.marketplace) != (query.store, query.marketplace):
             continue
@@ -128,7 +150,7 @@ def inbound(request, query):
     return reports.filtered(rows, query), sources
 
 
-def arrivals(query, user):
+def arrivals(query: ReportQuery, user: User) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
     from app.stock import supply_arrivals
 
     data = supply_arrivals.report(user)
@@ -157,11 +179,11 @@ def arrivals(query, user):
     ]
 
 
-def cost_report(query, user):
+def cost_report(query: ReportQuery, user: User) -> tuple[list[dict[str, JsonValue]], dict[str, JsonValue]]:
     from app.stock import cost_report as source
 
     data = source.build_report(
-        (query.store,), query.date_from, query.date_to, (query.marketplace,), scope_pairs(user)
+        (query.store,), query.date_from, query.date_to, (query.marketplace,), store_marketplace_pairs(user)
     )
     context = {
         "reconciliation": [
@@ -183,7 +205,7 @@ def cost_report(query, user):
             ]
         return rows, context
     rows = []
-    allowed = set(scope_pairs(user))
+    allowed = set(store_marketplace_pairs(user))
     for operation in source.operations_for_view(data, query.cost_view):
         platforms = {operation.get(k) for k in ("from_marketplace", "to_marketplace")} - {None, ""}
         if any((query.store, mp) not in allowed for mp in platforms):
@@ -208,7 +230,73 @@ async def execute_extra(name, request, user, query, *, paginate=True):
     ]
     context, sources = {}, []
     sort_fields = ("ordered_at", "external_order_id", "supply_id", "arrival", "row", "store_slug")
-    if name == "stock-history":
+    if name == "standard-costs":
+        from app.economics.wb.standard_profit import enrich
+        from app.repositories.wb_standard_costs import load
+
+        snapshot = await run_in_threadpool(load, query.store)
+        if snapshot is None:
+            rows = []
+            context = {"available": False, "basis": "per_unit_scenario", "snapshot_period": None}
+            warnings.append("Сохранённый отчёт магазина отсутствует; это не нулевые расходы.")
+        else:
+            snapshot = await run_in_threadpool(enrich, query.store, snapshot)
+            from app.dto.agent_standard_costs import StandardCostsRow
+
+            public_rows = [StandardCostsRow.from_report(row).model_dump(mode="json") for row in snapshot.rows]
+            rows = reports.filtered(public_rows, query)
+            context = {
+                "available": True,
+                "basis": "per_unit_scenario",
+                "snapshot_period": {"date_from": snapshot.date_from, "date_to": snapshot.date_to},
+                "commission_date": snapshot.commission_date,
+                "scenario_labels": {
+                    "profit": "Без ИУ",
+                    "current_profit": "С ИУ",
+                    "delta": "Без ИУ минус с ИУ",
+                },
+            }
+            sources = [
+                {
+                    "source": "wb_standard_costs_snapshots",
+                    "updated_at": snapshot.updated_at,
+                }
+            ]
+        sort_fields = ("scheme",)
+        warnings.append(
+            "Сценарное сравнение на единицу, не фактическая прибыль недели. Последний снимок и текущие данные калькулятора. delta.roi — процентные пункты. null не заменять нулём; проверяйте complete/missing обоих сценариев и warnings строки."
+        )
+    elif name in {"spp-hourly", "spp-daily"}:
+        from app.dto.spp_history import SppHistoryKind, SppHistoryQuery
+
+        saved = await run_in_threadpool(
+            request.app.state.container.spp_history.read,
+            SppHistoryQuery(SppHistoryKind(name), query.store, query.date_from, query.date_to, query.article),
+        )
+        rows = [asdict(row) for row in saved]
+        sort_fields = (
+            "observed_at",
+            "customer_price_with_spp",
+            "spp_percent",
+            "customer_price_with_wallet",
+            "average_customer_price_with_spp",
+            "average_spp_percent",
+            "average_customer_price_with_wallet",
+        )
+        context = {
+            "basis": "saved_hourly_observations" if name == "spp-hourly" else "saved_daily_averages",
+            "date_filter_timezone": "Europe/Moscow",
+            "coverage": "unknown",
+        }
+        warnings.append(
+            "После закрытия дня почасовые записи удаляются, остаются дневные средние. Пропуски не заполняются."
+        )
+        if name == "spp-daily":
+            context["averaging"] = "positive_saved_turnover_weights_else_arithmetic_mean"
+            warnings.append(
+                "Средние сохранены при закрытии дня: веса — положительный накопленный оборот на момент наблюдения; без таких весов — обычное среднее. observed_at — время последнего наблюдения, не время закрытия дня."
+            )
+    elif name == "stock-history":
         rows = await run_in_threadpool(stock_history, query)
         context = {"basis": "daily_stock_snapshots", "transit_included": False}
         warnings.append(
@@ -267,6 +355,9 @@ async def execute_extra(name, request, user, query, *, paginate=True):
     # Explicit scalar default: some source reports start with a nested metric object.
     if page_query.sort_by is None:
         default = {
+            "standard-costs": "article",
+            "spp-hourly": "observed_at",
+            "spp-daily": "day",
             "orders": "ordered_at",
             "stock-history": "day",
             "economics-history": "day",

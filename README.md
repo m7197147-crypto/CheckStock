@@ -19,22 +19,36 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+python run.py
 ```
 
 Перед запуском положите реальные файлы доступов в `secrets/` по образцам из `secrets/example/`. `.env`, база и реальные секреты исключены из Git.
 
+Для последующих запусков достаточно `python run.py` из корня проекта с активированным `.venv`.
+Команда запускает сайт на `http://127.0.0.1:8000` и автоматические загрузки в одном терминале.
+Изменения Python-файлов в `app/` перезагружают сайт; загрузчик продолжает работать.
+`Ctrl+C` останавливает оба процесса: на штатное завершение отводится до 60 секунд.
+Если один процесс завершается, команда останавливает второй и возвращает ошибку.
+
+При необходимости процессы можно запускать отдельно, в разных терминалах:
+
+```powershell
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+python -m app.jobs.worker
+```
+
+Веб-сервер выполняет HTTP-запросы и ручные загрузки; автоматическое расписание обслуживает отдельный процесс. Оба процесса должны использовать одну БД и одинаковые настройки. Подробности повторов, восстановления и перехода со старой версии — в [инструкции планировщика](docs/background-jobs.md).
+
 ## Проверки
 
 ```powershell
-python -m ruff format --check app scripts
-python -m ruff check app scripts
-python -m unittest discover -s tests -v
-node --test tests/test_stock_mutation_ui.cjs
+python -m ruff format --check app scripts run.py
+python -m ruff check app scripts run.py
+python -m mypy
 ```
 
-При наличии `make` доступны цели `run`, `lint` и `check` (`check` равен `lint`), а `make format` изменяет файлы.
-Python-тесты запускаются через `unittest`; тесты клиентского кода — через `node --test` для файлов `tests/*.cjs`.
+При наличии `make` доступны цели `run` (только сайт), `scheduler`, `lint` и `check` (Ruff и mypy), а `make format` изменяет файлы.
+Автотесты удалены из рабочего дерева; команды выше выполняют статические проверки кода.
 
 ## Поставки на ФФ
 
@@ -55,19 +69,23 @@ Python-тесты запускаются через `unittest`; тесты кл�
 
 ```powershell
 Copy-Item .env.example .env
-docker compose up --build -d
-docker compose logs --follow app
+docker compose --env-file .env -f deploy/docker-compose.yml up --build -d
+docker compose --env-file .env -f deploy/docker-compose.yml logs --follow app scheduler
 ```
 
 Перед запуском задайте `POSTGRES_PASSWORD` в `.env`. Приложение доступно на `http://localhost:8000`. Docker Compose использует PostgreSQL: база хранится в именованном volume `postgres-data`, секреты подключаются read-only из локального каталога `secrets/`. `/healthz` проверяет процесс, `/readyz` дополнительно проверяет соединение с настроенной БД. При обычном локальном запуске без `CHECKSTOCK_DATABASE_URL` используется SQLite в `data/checkstock.db`.
 
+Для запуска Grafana, Loki и Alloy вместе с приложением на Linux-сервере используйте [серверный Compose для логов](docs/server-observability.md).
+
+Сервис `scheduler` запускается на том же образе и имеет отдельную проверку здоровья: `python -m app.jobs.worker --healthcheck`. Перезапуск `app` не перезапускает автоматические загрузки. Оба сервиса сохраняют отдельные файлы логов в общем томе `checkstock-logs`. При первом переходе остановите старый `app` со встроенными задачами перед запуском новой версии и `scheduler`.
+
 Остановка:
 
 ```text
-docker compose down
+docker compose --env-file .env -f deploy/docker-compose.yml down
 ```
 
-Для удаления данных требуется отдельное явное действие `docker compose down --volumes`; обычная остановка volume не удаляет.
+Для удаления данных требуется отдельное явное действие `docker compose --env-file .env -f deploy/docker-compose.yml down --volumes`; обычная остановка volume не удаляет.
 
 ## Отчёт «Целевая цена» WB
 

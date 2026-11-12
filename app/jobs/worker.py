@@ -1,0 +1,163 @@
+import argparse
+import asyncio
+import json
+import os
+import signal
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
+
+from fastapi.concurrency import run_in_threadpool
+
+from app.config import settings
+from app.core.constants import JOBS, SCHEDULER
+from app.core.logging_config import configure_logging, tagged_logger
+from app.infrastructure.async_resources import AsyncResources
+from app.jobs import database_backup
+from app.jobs.background import _initialize_application, scheduled_jobs
+from app.jobs.scheduling import ScheduledJob, run_background_job, wait_for_stop
+from app.repositories.core import get_connection
+
+HEARTBEAT_INTERVAL_SECONDS = SCHEDULER.heartbeat_interval_seconds
+HEARTBEAT_MAX_AGE_SECONDS = SCHEDULER.heartbeat_max_age_seconds
+
+logger = tagged_logger(__name__, "jobs", "worker")
+
+
+class JobMode(StrEnum):
+    ALL = "all"
+    BACKUP_ONLY = "backup-only"
+    WITHOUT_BACKUP = "without-backup"
+
+
+def heartbeat_path() -> Path:
+    return settings.database_path.parent / SCHEDULER.heartbeat_filename
+
+
+def _check_database() -> None:
+    with get_connection() as connection:
+        connection.execute("SELECT 1").fetchone()
+
+
+def _write_heartbeat(path: Path) -> None:
+    _check_database()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps({"pid": os.getpid(), "updated_at": datetime.now(UTC).isoformat()}),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def healthcheck(path: Path) -> bool:
+    try:
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        updated = datetime.fromisoformat(heartbeat["updated_at"])
+        age = (datetime.now(UTC) - updated).total_seconds()
+        if not -SCHEDULER.heartbeat_clock_skew_seconds <= age <= HEARTBEAT_MAX_AGE_SECONDS:
+            raise ValueError("Scheduler heartbeat is stale")
+        _check_database()
+        return True
+    except Exception as error:
+        logger.warning("scheduler_unhealthy error_type=%s", type(error).__name__)
+        return False
+
+
+async def _heartbeat(stop: asyncio.Event, path: Path) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(_write_heartbeat, path)
+        except Exception:
+            logger.exception("scheduler_heartbeat_failed")
+        await wait_for_stop(stop, HEARTBEAT_INTERVAL_SECONDS)
+
+
+def _remove_heartbeat(path: Path) -> None:
+    try:
+        if json.loads(path.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
+async def run(stop: asyncio.Event, path: Path, mode: JobMode = JobMode.ALL) -> None:
+    while not stop.is_set():
+        try:
+            await run_in_threadpool(_initialize_application)
+            break
+        except Exception:
+            logger.exception("scheduler_initialization_failed")
+            await wait_for_stop(stop, SCHEDULER.error_retry_seconds)
+    if stop.is_set():
+        return
+    async with AsyncResources() as resources:
+        await _run_jobs(stop, path, resources, mode)
+
+
+def _jobs_for_mode(mode: JobMode) -> tuple[ScheduledJob, ...]:
+    if mode == JobMode.BACKUP_ONLY:
+        return (database_backup.job(),)
+    jobs = scheduled_jobs(asyncio.Event())
+    if mode == JobMode.WITHOUT_BACKUP:
+        return tuple(job for job in jobs if job.name != JOBS.database_backup.name)
+    return jobs
+
+
+async def _run_jobs(
+    stop: asyncio.Event, path: Path, resources: AsyncResources, mode: JobMode = JobMode.ALL
+) -> None:
+    jobs = _jobs_for_mode(mode)
+    tasks = [
+        asyncio.create_task(run_background_job(job, stop, resources), name=f"checkstock:{job.name}")
+        for job in jobs
+    ]
+    tasks.append(asyncio.create_task(_heartbeat(stop, path), name="checkstock:scheduler_heartbeat"))
+    stopping = asyncio.create_task(stop.wait())
+    logger.info("scheduler_started jobs=%s mode=%s", len(jobs), mode)
+    try:
+        done, _ = await asyncio.wait([stopping, *tasks], return_when=asyncio.FIRST_COMPLETED)
+        if not stop.is_set():
+            for task in done:
+                task.result()
+            raise RuntimeError("A scheduler task stopped unexpectedly")
+    finally:
+        stop.set()
+        stopping.cancel()
+        await asyncio.gather(stopping, *tasks, return_exceptions=True)
+        _remove_heartbeat(path)
+        logger.info("scheduler_stopped")
+
+
+async def _main(path: Path, mode: JobMode = JobMode.ALL) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous = {}
+
+    def request_stop(signum, frame):
+        loop.call_soon_threadsafe(stop.set)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, request_stop)
+    try:
+        await run(stop, path, mode)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--healthcheck", action="store_true")
+    parser.add_argument("--heartbeat-path", type=Path, default=heartbeat_path())
+    parser.add_argument("--job-mode", type=JobMode, choices=tuple(JobMode), default=JobMode.ALL)
+    args = parser.parse_args()
+    configure_logging()
+    if args.healthcheck:
+        return 0 if healthcheck(args.heartbeat_path) else 1
+    asyncio.run(_main(args.heartbeat_path, args.job_mode))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

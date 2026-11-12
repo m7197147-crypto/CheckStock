@@ -3,11 +3,26 @@ from datetime import UTC, datetime
 
 from sqlalchemy import inspect, select
 
-from app.core.stores import STORES
+from app.core.constants import DatabaseDialect
 from app.infrastructure import daily_economics_orm as daily_economics_orm
 from app.infrastructure import economics_coverage_orm as economics_coverage_orm
 from app.infrastructure import ephemerides_orm as ephemerides_orm
+from app.infrastructure import fbo_stock_orm as fbo_stock_orm
 from app.infrastructure import finance_orm as finance_orm
+from app.infrastructure import google_week_orm as google_week_orm
+from app.infrastructure import ozon_advertising_orm as ozon_advertising_orm
+from app.infrastructure import ozon_analytics_orm as ozon_analytics_orm
+from app.infrastructure import ozon_cabinet_orm as ozon_cabinet_orm
+from app.infrastructure import ozon_commissions_orm as ozon_commissions_orm
+from app.infrastructure import ozon_limits_orm as ozon_limits_orm
+from app.infrastructure import ozon_logistics_orm as ozon_logistics_orm
+from app.infrastructure import ozon_margin_orm as ozon_margin_orm
+from app.infrastructure import ozon_price_changes_orm as ozon_price_changes_orm
+from app.infrastructure import ozon_prices_orm as ozon_prices_orm
+from app.infrastructure import ozon_promotion_entry_orm as ozon_promotion_entry_orm
+from app.infrastructure import ozon_storage_orm as ozon_storage_orm
+from app.infrastructure import wb_standard_costs_orm as wb_standard_costs_orm
+from app.infrastructure import yandex_analytics_orm as yandex_analytics_orm
 from app.infrastructure import yandex_economics_orm as yandex_economics_orm
 from app.infrastructure.database import Database, DatabaseConnection, database_for_path
 from app.infrastructure.orm import FulfillmentRecord, OrmBase, StockItemRecord
@@ -18,14 +33,22 @@ from app.repositories.stock_sheet_export import MARKETPLACES
 
 def init_db() -> None:
     database = database_for_path(core.DB_PATH)
+    from app.repositories.identity_migration import retire_access_control
+
+    retire_access_control(database)
     _preserve_legacy_wb_funnel_daily_orders(database)
     target_table_was_rebuilt = _prepare_stock_sheet_export_target_migration(database)
     OrmBase.metadata.create_all(database.engine)
+    _migrate_marketplace_warehouse_quantities(database)
+    _migrate_wb_hourly_spp_percent(database)
+    _migrate_wb_hourly_turnover(database)
+    _index_wb_hourly_report(database)
     _migrate_project_sheet_export_urls(database)
     _migrate_project_sheet_export_orders_column(database)
     _migrate_project_sheet_export_fbo_columns(database)
     _migrate_stock_operation_item_purchase_price(database)
     _migrate_stock_operation_transit_batch(database)
+    _migrate_stock_transit_kind(database)
     _migrate_manual_supply_note(database)
     _backfill_sync_job_runs(database)
     _migrate_yandex_sync_settings(database)
@@ -55,7 +78,6 @@ def init_db() -> None:
         _migrate_ff_stock_marketplace(connection)
         _migrate_catalog_marketplace(connection)
         _migrate_operation_note(connection)
-        _migrate_user_permissions(connection)
         _migrate_trash_checked(connection)
         _migrate_mp_updated_at(connection)
         _migrate_image_url(connection)
@@ -66,6 +88,43 @@ def init_db() -> None:
         connection.commit()
 
     _sync_yandex_assortment(database)
+
+
+def _migrate_marketplace_warehouse_quantities(database: Database) -> None:
+    with core.WRITE_LOCK, database.connect() as connection:
+        columns = connection.column_names("mp_warehouse_stock")
+        exists = "IF NOT EXISTS " if connection.dialect_name == DatabaseDialect.POSTGRESQL else ""
+        for column in ("available_for_order", "reserved"):
+            if column not in columns:
+                connection.execute(f"ALTER TABLE mp_warehouse_stock ADD COLUMN {exists}{column} INTEGER")
+        connection.commit()
+
+
+def _migrate_wb_hourly_spp_percent(database: Database) -> None:
+    with core.WRITE_LOCK, database.connect() as connection:
+        if "spp_percent" in connection.column_names("wb_hourly_prices"):
+            return
+        connection.execute("ALTER TABLE wb_hourly_prices ADD COLUMN spp_percent FLOAT")
+        connection.commit()
+
+
+def _migrate_wb_hourly_turnover(database: Database) -> None:
+    with core.WRITE_LOCK, database.connect() as connection:
+        columns = connection.column_names("wb_hourly_prices")
+        if "orders_turnover_rub" not in columns:
+            connection.execute("ALTER TABLE wb_hourly_prices ADD COLUMN orders_turnover_rub FLOAT")
+        if "orders_turnover_updated_at" not in columns:
+            connection.execute("ALTER TABLE wb_hourly_prices ADD COLUMN orders_turnover_updated_at VARCHAR")
+        connection.commit()
+
+
+def _index_wb_hourly_report(database: Database) -> None:
+    with core.WRITE_LOCK, database.connect() as connection:
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wb_hourly_prices_store_time "
+            "ON wb_hourly_prices (store_slug, observed_at)"
+        )
+        connection.commit()
 
 
 def _migrate_project_sheet_export_urls(database: Database) -> None:
@@ -218,6 +277,17 @@ def _migrate_stock_operation_transit_batch(database: Database) -> None:
         connection.commit()
 
 
+def _migrate_stock_transit_kind(database: Database) -> None:
+    """Existing transit batches keep their FF-to-FF receipt behavior."""
+    with database.connect() as connection:
+        columns = connection.column_names("ff_transit_batches")
+        if columns and "kind" not in columns:
+            connection.execute(
+                "ALTER TABLE ff_transit_batches ADD COLUMN kind VARCHAR NOT NULL DEFAULT 'ff_transfer'"
+            )
+        connection.commit()
+
+
 def _migrate_manual_supply_note(database: Database) -> None:
     """Add a required explanatory note to manually planned supplies."""
 
@@ -268,25 +338,9 @@ def _remove_legacy_catalog_product_exclusions(database: Database) -> None:
 
 
 def _remove_legacy_unit_economics(database: Database) -> None:
-    """Remove the retired unit-economics storage while preserving 1C access rules."""
+    """Remove the retired unit-economics storage without changing current economics data."""
 
     with database.connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO user_section_access (user_id, section, access_level)
-            SELECT legacy.user_id, 'unit_economics_1c', legacy.access_level
-              FROM user_section_access legacy
-             WHERE legacy.section = 'unit_economics'
-               AND NOT EXISTS (
-                   SELECT 1
-                     FROM user_section_access current
-                    WHERE current.user_id = legacy.user_id
-                      AND current.section = 'unit_economics_1c'
-               )
-            ON CONFLICT DO NOTHING
-            """
-        )
-        connection.execute("DELETE FROM user_section_access WHERE section = 'unit_economics'")
         connection.execute(
             "DELETE FROM sync_health WHERE scope IN ('unit_cost', 'unit_prices', 'unit_reference')"
         )
@@ -312,6 +366,9 @@ def _migrate_unit_economics_1c_cabinet_settings(database: Database) -> None:
                 f"ALTER TABLE {table_name} ADD COLUMN target_roi_by_code TEXT NOT NULL DEFAULT '{{}}'"
             )
             columns.add("target_roi_by_code")
+        if columns and "hourly_d_coefficients" not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN hourly_d_coefficients TEXT")
+            columns.add("hourly_d_coefficients")
         if columns and "default_buyout_percent" not in columns:
             connection.execute(f"ALTER TABLE {table_name} ADD COLUMN default_buyout_percent FLOAT")
             columns.add("default_buyout_percent")
@@ -424,6 +481,9 @@ def _migrate_unit_economics_1c_product_categories(database: Database) -> None:
             connection.execute(f"ALTER TABLE {table_name} ALTER COLUMN imt_id TYPE BIGINT")
         if columns and "created_at" not in columns:
             connection.execute(f"ALTER TABLE {table_name} ADD COLUMN created_at TEXT")
+            connection.execute(f"UPDATE {table_name} SET synced_at='' ")
+        if columns and "brand" not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN brand TEXT")
             connection.execute(f"UPDATE {table_name} SET synced_at='' ")
         connection.commit()
 
@@ -707,31 +767,6 @@ def _migrate_trash_checked(connection: DatabaseConnection) -> None:
     columns = _column_names(connection, "trash_stock")
     if columns and "checked" not in columns:
         connection.execute("ALTER TABLE trash_stock ADD COLUMN checked INTEGER NOT NULL DEFAULT 0")
-
-
-def _migrate_user_permissions(connection: DatabaseConnection) -> None:
-    columns = _column_names(connection, "users")
-    if not columns:
-        return
-    if "can_edit_stock" not in columns:
-        connection.execute("ALTER TABLE users ADD COLUMN can_edit_stock INTEGER NOT NULL DEFAULT 1")
-        connection.execute("UPDATE users SET can_edit_stock = 0 WHERE role = 'user'")
-    if "can_manage_users" not in columns:
-        connection.execute("ALTER TABLE users ADD COLUMN can_manage_users INTEGER NOT NULL DEFAULT 1")
-        connection.execute("UPDATE users SET can_manage_users = 0 WHERE login = 'test'")
-
-    for row in connection.execute("SELECT id FROM users"):
-        user_id = int(row["id"] or 0)
-        has_access = connection.execute(
-            "SELECT 1 FROM user_store_access WHERE user_id = ? LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if has_access:
-            continue
-        connection.executemany(
-            "INSERT OR IGNORE INTO user_store_access (user_id, store_slug) VALUES (?, ?)",
-            ((user_id, slug) for slug in STORES),
-        )
 
 
 def _migrate_operation_note(connection: DatabaseConnection) -> None:

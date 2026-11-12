@@ -1,6 +1,5 @@
-"""Small read-only API for ChatGPT Actions, reusing the website's report and ACLs."""
+"""Small read-only API for ChatGPT Actions, reusing the website's reports and active accounts."""
 
-import logging
 import math
 from datetime import UTC, date, datetime
 from typing import Annotated, Literal
@@ -12,11 +11,11 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.access.access_control import accessible_stores
-from app.access.sections import has_access
+from app.access.resources import accessible_stores
 from app.agents.access import resolve_credential
 from app.config import settings
 from app.core.domain import MOSCOW_TIMEZONE
+from app.core.logging_config import tagged_logger
 from app.core.stores import STORES
 from app.dto.identity import SectionName, User, UserId
 from app.web.routers.unit_economics import _unit_economics_1c_unit_profit_report_data
@@ -24,7 +23,7 @@ from app.web.routers.unit_economics import _unit_economics_1c_unit_profit_report
 PREFIX = "/api/agent/v1"
 router = APIRouter(prefix=PREFIX, tags=["Employee analytics"])
 bearer = HTTPBearer(auto_error=False, scheme_name="EmployeeApiKey")
-logger = logging.getLogger(__name__)
+logger = tagged_logger(__name__, "web", "agent_analytics")
 
 
 async def employee(
@@ -45,8 +44,6 @@ async def employee(
         raise HTTPException(
             401, "Invalid or expired employee API key", headers={"WWW-Authenticate": "Bearer"}
         )
-    if not has_access(user, SectionName.AI_AGENTS):
-        raise HTTPException(403, "No access to analytics sections")
     request.state.user = user
     logger.info("agent_access user_id=%s key_id=%s path=%s", user.id, record.key_id, request.url.path)
     return user
@@ -65,7 +62,7 @@ class StoreInfo(BaseModel):
 class LossQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    marketplace: Literal["WB", "YANDEX MARKET"] = "WB"
+    marketplace: Literal["WB", "YANDEX MARKET", "OZON"] = "WB"
     date_from: date
     date_to: date
     store: str = Field(min_length=1, max_length=100, description="Store slug from listAnalyticsStores")
@@ -92,7 +89,7 @@ class LossRow(BaseModel):
 
 
 class LossReport(BaseModel):
-    marketplace: Literal["WB", "YANDEX MARKET"] = "WB"
+    marketplace: Literal["WB", "YANDEX MARKET", "OZON"] = "WB"
     currency: Literal["RUB"] = "RUB"
     metric: Literal["estimated_period_profit"] = "estimated_period_profit"
     date_from: date
@@ -108,7 +105,7 @@ class LossReport(BaseModel):
 @router.get("/stores", operation_id="listAnalyticsStores", response_model=list[StoreInfo])
 async def stores(user: Employee):
     """List accessible stores and marketplaces. Permissions do not imply data is loaded."""
-    from app.access.access_control import accessible_marketplaces
+    from app.access.resources import accessible_marketplaces
 
     return [
         StoreInfo(
@@ -201,6 +198,22 @@ async def losses(request: Request, user: Employee, query: Annotated[LossQuery, Q
         raise HTTPException(422, "Future dates are not supported")
     if query.store not in accessible_stores(user, query.marketplace):
         raise HTTPException(403, "No access to this marketplace store")
+    if query.marketplace == "OZON":
+        from app.container import agent_ozon_service
+        from app.dto.agent_query import ReportQuery
+
+        data = await agent_ozon_service(request.app.state.async_resources).load(
+            "profit",
+            ReportQuery(
+                store=query.store,
+                marketplace="OZON",
+                date_from=query.date_from,
+                date_to=query.date_to,
+                article=query.article,
+            ),
+            user,
+        )
+        return summarize_losses({"rows": data.rows}, query)
     if query.marketplace == "YANDEX MARKET":
         from app.economics.yandex.reports import load_rows
 

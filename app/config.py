@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -8,6 +9,9 @@ MIN_PBKDF2_ITERATIONS = 100_000
 MAX_PBKDF2_ITERATIONS = 5_000_000
 TRUE_VALUES = {"1", "true", "yes", "on"}
 FALSE_VALUES = {"0", "false", "no", "off"}
+MCP_DEFAULT_REDIRECT_URIS = (
+    "https://claude.ai/api/mcp/auth_callback https://chatgpt.com/connector_platform_oauth_redirect"
+)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -64,8 +68,125 @@ def _env_choice(
     return normalized
 
 
+class WbStandardCostsSettings(BaseModel):
+    model_config = ConfigDict(frozen=True, validate_default=True)
+
+    interval_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_INTERVAL_SECONDS", 14400, minimum=1), ge=1
+    )
+    startup_delay_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_STARTUP_DELAY_SECONDS", 60, minimum=0), ge=0
+    )
+    retry_first_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_RETRY_FIRST_SECONDS", 300, minimum=1), ge=1
+    )
+    retry_second_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_RETRY_SECOND_SECONDS", 900, minimum=1), ge=1
+    )
+    finance_page_size: int = Field(
+        default_factory=lambda: _env_int(
+            "CHECKSTOCK_WB_STANDARD_FINANCE_PAGE_SIZE", 100000, minimum=1, maximum=100000
+        ),
+        ge=1,
+        le=100000,
+    )
+    finance_max_pages: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_FINANCE_MAX_PAGES", 1000, minimum=1), ge=1
+    )
+    card_page_size: int = Field(
+        default_factory=lambda: _env_int(
+            "CHECKSTOCK_WB_STANDARD_CARD_PAGE_SIZE", 100, minimum=1, maximum=100
+        ),
+        ge=1,
+        le=100,
+    )
+    card_max_pages: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_CARD_MAX_PAGES", 10000, minimum=1), ge=1
+    )
+    storage_poll_attempts: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_STORAGE_POLL_ATTEMPTS", 30, minimum=1), ge=1
+    )
+    storage_poll_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_WB_STANDARD_STORAGE_POLL_SECONDS", 5, minimum=0), ge=0
+    )
+
+
+class OzonApiLimitsSettings(BaseModel):
+    model_config = ConfigDict(frozen=True, validate_default=True)
+
+    seller_requests_per_second: float = Field(
+        default_factory=lambda: float(os.getenv("CHECKSTOCK_OZON_SELLER_REQUESTS_PER_SECOND", "40")),
+        gt=0,
+        le=50,
+        allow_inf_nan=False,
+    )
+    performance_organizations: dict[str, str] = Field(
+        default_factory=lambda: json.loads(
+            os.getenv("CHECKSTOCK_OZON_PERFORMANCE_ORGANIZATIONS", "").strip() or "{}"
+        )
+    )
+
+    @model_validator(mode="after")
+    def nonempty_organizations(self) -> "OzonApiLimitsSettings":
+        if any(
+            not store.strip() or not organization.strip()
+            for store, organization in self.performance_organizations.items()
+        ):
+            raise ValueError("Performance organization mappings must be nonempty")
+        return self
+
+
+class DatabaseBackupSettings(BaseModel):
+    model_config = ConfigDict(frozen=True, validate_default=True)
+
+    enabled: bool = Field(default_factory=lambda: _env_bool("CHECKSTOCK_BACKUP_ENABLED", False))
+    folder_id: str = Field(
+        default_factory=lambda: os.getenv("CHECKSTOCK_BACKUP_DRIVE_FOLDER_ID", "").strip(),
+        pattern=r"^[A-Za-z0-9_-]*$",
+    )
+    directory: Path = Field(
+        default_factory=lambda: Path(
+            os.getenv("CHECKSTOCK_BACKUP_DIRECTORY", BASE_DIR / "data" / "backups" / "database")
+        )
+    )
+    pg_dump: str = Field(default_factory=lambda: os.getenv("CHECKSTOCK_BACKUP_PG_DUMP", "pg_dump"))
+    pg_restore: str = Field(default_factory=lambda: os.getenv("CHECKSTOCK_BACKUP_PG_RESTORE", "pg_restore"))
+    process_timeout_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_BACKUP_TIMEOUT_SECONDS", 7200, minimum=60), ge=60
+    )
+    http_timeout_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_BACKUP_HTTP_TIMEOUT_SECONDS", 180, minimum=10), ge=10
+    )
+
+
 class Settings(BaseModel):
+    yandex_analytics_funnel_history_refresh_seconds: int = Field(
+        default_factory=lambda: _env_int(
+            "CHECKSTOCK_YANDEX_ANALYTICS_FUNNEL_HISTORY_REFRESH_SECONDS", 14400, minimum=1
+        ),
+        ge=1,
+    )
+    yandex_analytics_funnel_interval_seconds: int = Field(
+        default_factory=lambda: _env_int(
+            "CHECKSTOCK_YANDEX_ANALYTICS_FUNNEL_INTERVAL_SECONDS", 900, minimum=1
+        ),
+        ge=1,
+    )
+    yandex_analytics_transit_interval_seconds: int = Field(
+        default_factory=lambda: _env_int(
+            "CHECKSTOCK_YANDEX_ANALYTICS_TRANSIT_INTERVAL_SECONDS", 14400, minimum=1
+        ),
+        ge=1,
+    )
+    yandex_analytics_startup_delay_seconds: int = Field(
+        default_factory=lambda: _env_int("CHECKSTOCK_YANDEX_ANALYTICS_STARTUP_DELAY_SECONDS", 180, minimum=0),
+        ge=0,
+    )
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    wb_standard_costs: WbStandardCostsSettings = Field(default_factory=WbStandardCostsSettings)
+    ozon_api_limits: OzonApiLimitsSettings = Field(default_factory=OzonApiLimitsSettings)
+    database_backup: DatabaseBackupSettings = Field(default_factory=DatabaseBackupSettings)
 
     base_dir: Path
     database_path: Path
@@ -78,18 +199,29 @@ class Settings(BaseModel):
     agent_tokens_path: Path = BASE_DIR / "secrets" / "chatgpt_tokens.json"
     wb_tokens_path: Path
     ozon_tokens_path: Path
+    ozon_tariffs_path: Path = BASE_DIR / "app" / "ozon" / "data" / "commission-tariffs.json"
+    ozon_category_cache_seconds: int = Field(default=3600, ge=0)
+    ozon_related_cache_seconds: int = Field(default=3600, ge=0)
+    ozon_promotions_cache_seconds: int = Field(default=300, ge=0)
+    ozon_promotions_timeout_seconds: int = Field(default=60, ge=1)
+    ozon_promotion_entry_preview_seconds: int = Field(default=180, ge=10)
+    ozon_price_change_preview_seconds: int = Field(default=180, ge=10)
+    ozon_price_change_verify_attempts: int = Field(default=3, ge=1, le=10)
+    ozon_price_change_verify_interval_seconds: float = Field(default=2, ge=0, le=30)
     yandex_tokens_path: Path
     google_service_account_path: Path
     log_level: str
+    log_file: Path | None = None
     slow_request_threshold_ms: int = Field(ge=1)
     background_sync_enabled: bool
     yandex_finance_enabled: bool = False
     yandex_finance_secrets_path: Path | None = None
     yandex_finance_raw_retention_days: int = Field(default=365, ge=90)
     yandex_finance_reconcile_months: int = Field(default=0, ge=0, le=12)
-    economics_preview_user_id: int = Field(default=0, ge=0)
+    economics_preview_enabled: bool = False
     funnel_orders_sync_enabled: bool
     unit_economics_1c_price_sync_enabled: bool
+    wb_hourly_prices_enabled: bool = True
     unit_economics_1c_source_sync_hour: int = Field(ge=0, le=23)
     ftp_export_enabled: bool
     ftp_export_start_hour: int = Field(ge=0, le=23)
@@ -121,9 +253,12 @@ class Settings(BaseModel):
     wb_funnel_orders_sync_interval_seconds: int = Field(ge=1)
     unit_economics_1c_price_sync_interval_seconds: int = Field(ge=1)
     unit_economics_1c_wallet_sync_interval_seconds: int = Field(ge=1)
+    wb_hourly_prices_interval_seconds: int = Field(default=3600, ge=1)
     wb_storefront_dest: str = Field(min_length=1)
     wb_storefront_batch_size: int = Field(ge=1, le=1_000)
     wb_storefront_auto_refresh: bool = True
+    wb_storefront_browser_headless: bool = True
+    wb_storefront_browser_no_sandbox: bool = False
     session_ttl_days: int = Field(ge=1)
     session_cookie_secure: bool
     pbkdf2_iterations: int = Field(ge=MIN_PBKDF2_ITERATIONS, le=MAX_PBKDF2_ITERATIONS)
@@ -132,6 +267,9 @@ class Settings(BaseModel):
     ff_import_timeout_seconds: int = Field(ge=1)
     wb_request_timeout_seconds: int = Field(ge=1)
     ozon_request_timeout_seconds: int = Field(ge=1)
+    ozon_logistics_request_interval_seconds: float = Field(default=2, ge=0, allow_inf_nan=False)
+    ozon_logistics_request_attempts: int = Field(default=20, ge=1, le=20)
+    ozon_storage_request_interval_seconds: float = Field(default=1, ge=0, allow_inf_nan=False)
     yandex_request_timeout_seconds: int = Field(ge=1)
     wb_request_attempts: int = Field(ge=1, le=20)
     ozon_request_attempts: int = Field(ge=1, le=20)
@@ -143,12 +281,6 @@ class Settings(BaseModel):
     rnp_report_download_timeout_seconds: int = Field(ge=1)
     rnp_report_poll_attempts: int = Field(ge=1)
     rnp_report_poll_interval_seconds: int = Field(ge=0)
-    smtp_host: str = ""
-    smtp_port: int = Field(default=587, ge=1, le=65_535)
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_sender: str = ""
-    smtp_starttls: bool = True
 
     @model_validator(mode="after")
     def validate_runtime_settings(self) -> "Settings":
@@ -197,6 +329,7 @@ class Settings(BaseModel):
                 )
             ),
             log_level=log_level,
+            log_file=Path(log_file) if (log_file := os.getenv("CHECKSTOCK_LOG_FILE", "").strip()) else None,
             slow_request_threshold_ms=_env_int("CHECKSTOCK_SLOW_REQUEST_THRESHOLD_MS", 1_000, minimum=1),
             background_sync_enabled=not _env_bool("CHECKSTOCK_DISABLE_BACKGROUND_SYNC", False),
             yandex_finance_enabled=_env_bool("CHECKSTOCK_YANDEX_FINANCE_ENABLED", False),
@@ -211,7 +344,11 @@ class Settings(BaseModel):
             yandex_finance_reconcile_months=_env_int(
                 "CHECKSTOCK_YANDEX_FINANCE_RECONCILE_MONTHS", 0, maximum=12
             ),
-            economics_preview_user_id=_env_int("CHECKSTOCK_ECONOMICS_PREVIEW_USER_ID", 0),
+            economics_preview_enabled=(
+                _env_bool("CHECKSTOCK_ECONOMICS_PREVIEW_ENABLED", False)
+                if "CHECKSTOCK_ECONOMICS_PREVIEW_ENABLED" in os.environ
+                else _env_int("CHECKSTOCK_ECONOMICS_PREVIEW_USER_ID", 0) > 0
+            ),
             inbound_sync_interval_seconds=_env_int(
                 "CHECKSTOCK_INBOUND_SYNC_INTERVAL_SECONDS", 1800, minimum=300
             ),
@@ -226,6 +363,7 @@ class Settings(BaseModel):
             unit_economics_1c_price_sync_enabled=_env_bool(
                 "CHECKSTOCK_UNIT_ECONOMICS_1C_PRICE_SYNC_ENABLED", True
             ),
+            wb_hourly_prices_enabled=_env_bool("CHECKSTOCK_WB_HOURLY_PRICES_ENABLED", True),
             unit_economics_1c_source_sync_hour=_env_int(
                 "CHECKSTOCK_UNIT_ECONOMICS_1C_SOURCE_SYNC_HOUR", 2, maximum=23
             ),
@@ -287,11 +425,16 @@ class Settings(BaseModel):
                 5 * 60,
                 minimum=1,
             ),
+            wb_hourly_prices_interval_seconds=_env_int(
+                "CHECKSTOCK_WB_HOURLY_PRICES_INTERVAL_SECONDS", 60 * 60, minimum=1
+            ),
             wb_storefront_dest=os.getenv("CHECKSTOCK_WB_STOREFRONT_DEST", "-1257786").strip() or "-1257786",
             wb_storefront_batch_size=_env_int(
                 "CHECKSTOCK_WB_STOREFRONT_BATCH_SIZE", 1_000, minimum=1, maximum=1_000
             ),
             wb_storefront_auto_refresh=_env_bool("CHECKSTOCK_WB_STOREFRONT_AUTO_REFRESH", True),
+            wb_storefront_browser_headless=_env_bool("CHECKSTOCK_WB_BROWSER_HEADLESS", True),
+            wb_storefront_browser_no_sandbox=_env_bool("CHECKSTOCK_WB_BROWSER_NO_SANDBOX", False),
             session_ttl_days=_env_int("CHECKSTOCK_SESSION_TTL_DAYS", 14, minimum=1),
             session_cookie_secure=_env_bool("CHECKSTOCK_SESSION_COOKIE_SECURE", False),
             pbkdf2_iterations=_env_int(
@@ -305,6 +448,15 @@ class Settings(BaseModel):
             ff_import_timeout_seconds=_env_int("CHECKSTOCK_FF_IMPORT_TIMEOUT_SECONDS", 30, minimum=1),
             wb_request_timeout_seconds=_env_int("CHECKSTOCK_WB_REQUEST_TIMEOUT_SECONDS", 30, minimum=1),
             ozon_request_timeout_seconds=_env_int("CHECKSTOCK_OZON_REQUEST_TIMEOUT_SECONDS", 60, minimum=1),
+            ozon_logistics_request_interval_seconds=float(
+                os.getenv("CHECKSTOCK_OZON_LOGISTICS_REQUEST_INTERVAL_SECONDS", "2")
+            ),
+            ozon_logistics_request_attempts=_env_int(
+                "CHECKSTOCK_OZON_LOGISTICS_REQUEST_ATTEMPTS", 20, minimum=1, maximum=20
+            ),
+            ozon_storage_request_interval_seconds=float(
+                os.getenv("CHECKSTOCK_OZON_STORAGE_REQUEST_INTERVAL_SECONDS", "1")
+            ),
             yandex_request_timeout_seconds=_env_int(
                 "CHECKSTOCK_YANDEX_REQUEST_TIMEOUT_SECONDS", 60, minimum=1
             ),
@@ -322,12 +474,6 @@ class Settings(BaseModel):
             rnp_report_poll_interval_seconds=_env_int(
                 "CHECKSTOCK_RNP_REPORT_POLL_INTERVAL_SECONDS", 1, minimum=0
             ),
-            smtp_host=os.getenv("CHECKSTOCK_SMTP_HOST", "").strip(),
-            smtp_port=_env_int("CHECKSTOCK_SMTP_PORT", 587, minimum=1, maximum=65_535),
-            smtp_username=os.getenv("CHECKSTOCK_SMTP_USERNAME", "").strip(),
-            smtp_password=os.getenv("CHECKSTOCK_SMTP_PASSWORD", ""),
-            smtp_sender=os.getenv("CHECKSTOCK_SMTP_SENDER", "").strip(),
-            smtp_starttls=_env_bool("CHECKSTOCK_SMTP_STARTTLS", True),
         )
 
 
